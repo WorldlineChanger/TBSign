@@ -87,7 +87,7 @@ def get_favorite(bduss):
     }
     data = encodeData(data)
     try:
-        res = s.post(url=LIKIE_URL, data=data, timeout=5).json()
+        res = s.post(url=LIKIE_URL, data=data, timeout=10).json()
     except Exception as e:
         logger.error("获取关注的贴吧出错" + e)
         return []
@@ -118,7 +118,7 @@ def get_favorite(bduss):
         }
         data = encodeData(data)
         try:
-            res = s.post(url=LIKIE_URL, data=data, timeout=5).json()
+            res = s.post(url=LIKIE_URL, data=data, timeout=10).json()
         except Exception as e:
             logger.error("获取关注的贴吧出错" + e)
             continue
@@ -170,7 +170,7 @@ def client_sign(bduss, tbs, fid, kw):
     data = copy.copy(SIGN_DATA)
     data.update({BDUSS: bduss, FID: fid, KW: kw, TBS: tbs, TIMESTAMP: str(int(time.time()))})
     data = encodeData(data)
-    res = s.post(url=SIGN_URL, data=data, timeout=5).json()
+    res = s.post(url=SIGN_URL, data=data, timeout=10).json()
     return res
 
 def send_email(sign_list):
