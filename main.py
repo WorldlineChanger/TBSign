@@ -173,7 +173,7 @@ def client_sign(bduss, tbs, fid, kw):
     res = s.post(url=SIGN_URL, data=data, timeout=10).json()
     return res
 
-def send_email(sign_list):
+def send_email(sign_list, total_sign_time):
     if ('HOST' not in ENV or 'FROM' not in ENV or 'TO' not in ENV or 'AUTH' not in ENV):
         logger.error("未配置邮箱")
         return
@@ -183,7 +183,12 @@ def send_email(sign_list):
     AUTH = ENV['AUTH']
     length = len(sign_list)
     subject = f"{time.strftime('%Y-%m-%d', time.localtime())} 签到{length}个贴吧"
-    body = """
+    
+    # 邮件正文加入账号信息和总签到时间
+    body = f"<h2 style='color: #66ccff;'>签到报告 - {time.strftime('%Y年%m月%d日', time.localtime())}</h2>"
+    body += f"共有{length}个账号签到，总签到时间：{total_sign_time}秒<br>"
+    
+    body += """
     <style>
     .child {
       background-color: rgba(173, 216, 230, 0.19);
@@ -195,14 +200,20 @@ def send_email(sign_list):
     }
     </style>
     """
-    for i in sign_list:
-        body += f"""
-        <div class="child">
-            <div class="name"> 贴吧名称: { i['name'] }</div>
-            <div class="slogan"> 贴吧简介: { i['slogan'] }</div>
-        </div>
-        <hr>
-        """
+    
+    for idx, user_favorites in enumerate(sign_list):
+        # 标记用户账号（第几个账号）
+        body += f"<br>账号{idx+1}的签到信息：<br>"
+        
+        for i in user_favorites:
+            body += f"""
+            <div class="child">
+                <div class="name"> 贴吧名称: { i['name'] }</div>
+                <div class="slogan"> 贴吧简介: { i['slogan'] }</div>
+            </div>
+            <hr>
+            """
+    
     msg = MIMEText(body, 'html', 'utf-8')
     msg['subject'] = subject
     smtp = smtplib.SMTP()
@@ -211,23 +222,28 @@ def send_email(sign_list):
     smtp.sendmail(FROM, TO, msg.as_string())
     smtp.quit()
 
+
 def main():
     if ('BDUSS' not in ENV):
         logger.error("未配置BDUSS")
         return
     b = ENV['BDUSS'].split('#')
     all_favorites = []  # 创建空列表存储所有用户的关注贴吧
-    for n, i in enumerate(b):
-        # logger.info("开始签到第" + str(n) + "个用户" + i)
+    total_sign_time = 0  # 总签到时间
+    for n, i in enumerate(b, start=1):
         logger.info("开始签到第" + str(n) + "个用户")
+        start_time = time.time()  # 记录用户签到开始时间
         tbs = get_tbs(i)
         favorites = get_favorite(i)
         for j in favorites:
-            time.sleep(random.randint(1,5))
+            time.sleep(random.randint(1, 3))
             client_sign(i, tbs, j["id"], j["name"])
         logger.info("完成第" + str(n) + "个用户签到")
-        all_favorites.extend(favorites)  # 将每个用户的关注贴吧添加到 all_favorites 列表中
-    send_email(all_favorites)  # 调用 send_email 函数，将包含所有用户关注列表传递
+        end_time = time.time()  # 记录用户签到结束时间
+        total_sign_time += int(end_time - start_time)  # 计算用户签到时间并累加到总签到时间
+        all_favorites.append(favorites)  # 将每个用户的关注贴吧添加到 all_favorites 列表中
+
+    send_email(all_favorites, total_sign_time)  # 将包含所有用户关注贴吧的列表和总签到时间传递
     logger.info("所有用户签到结束")
 
 

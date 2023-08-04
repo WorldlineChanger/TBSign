@@ -6,7 +6,6 @@ on:
       - main
   schedule:
     - cron: '0 19 * * *'
-    - cron: '0 20 * * *'
     
 jobs:
   tieba_sign:
