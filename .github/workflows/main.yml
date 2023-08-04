@@ -11,8 +11,6 @@ on:
 jobs:
   tieba_sign:
     runs-on: ubuntu-latest
-    environment:  # 指定使用的环境
-      name: EV
     steps:
       - name: 'Checkout codes'
         uses: actions/checkout@v2
