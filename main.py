@@ -216,6 +216,7 @@ def main():
         logger.error("未配置BDUSS")
         return
     b = ENV['BDUSS'].split('#')
+    all_favorites = []  # 创建空列表存储所有用户的关注贴吧
     for n, i in enumerate(b):
         # logger.info("开始签到第" + str(n) + "个用户" + i)
         logger.info("开始签到第" + str(n) + "个用户")
@@ -225,7 +226,8 @@ def main():
             time.sleep(random.randint(1,5))
             client_sign(i, tbs, j["id"], j["name"])
         logger.info("完成第" + str(n) + "个用户签到")
-    send_email(favorites)
+        all_favorites.extend(favorites)  # 将每个用户的关注贴吧添加到 all_favorites 列表中
+    send_email(all_favorites)  # 调用 send_email 函数，将包含所有用户关注列表传递
     logger.info("所有用户签到结束")
 
 
