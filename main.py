@@ -6,7 +6,6 @@ import time
 import copy
 import logging
 import random
-import time
 
 import smtplib
 from email.mime.text import MIMEText
@@ -60,7 +59,7 @@ def get_tbs(bduss):
     try:
         tbs = s.get(url=TBS_URL, headers=headers, timeout=5).json()[TBS]
     except Exception as e:
-        logger.error("获取tbs出错" + e)
+        logger.error("获取tbs出错" + str(e))
         logger.info("重新获取tbs开始")
         tbs = s.get(url=TBS_URL, headers=headers, timeout=5).json()[TBS]
     logger.info("获取tbs结束")
@@ -175,7 +174,7 @@ def client_sign(bduss, tbs, fid, kw):
     return res
 
 def format_time(seconds):
-    # 将秒数格式化为几分几秒的形式
+    # 转换时间格式
     minutes = seconds // 60
     remaining_seconds = seconds % 60
 
@@ -225,14 +224,21 @@ def send_email(sign_list, total_sign_time):
             <hr>
             """
     
-    msg = MIMEText(body, 'html', 'utf-8')
-    msg['subject'] = subject
-    smtp = smtplib.SMTP()
-    smtp.connect(HOST)
-    smtp.login(FROM, AUTH)
-    smtp.sendmail(FROM, TO, msg.as_string())
-    smtp.quit()
+    try:
+        msg = MIMEText(body, 'html', 'utf-8')
+        msg['subject'] = subject
+        smtp = smtplib.SMTP()
+        smtp.connect(HOST)
+        smtp.login(FROM, AUTH)
+        smtp.sendmail(FROM, TO, msg.as_string())
+        smtp.quit()
 
+        logger.info("邮件发送成功")
+    except smtplib.SMTPException as e:
+        logger.error("邮件发送失败：" + str(e))
+    except Exception as e:
+        logger.error("邮件发送时发生错误：" + str(e))
+    
 
 def main():
     if ('BDUSS' not in ENV):
