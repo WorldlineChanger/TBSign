@@ -196,7 +196,7 @@ def send_email(sign_list, total_sign_time):
     
     # 邮件正文加入账号信息和总签到时间
     body = f"<h2 style='color: #66ccff;'>签到报告 - {time.strftime('%Y年%m月%d日', time.localtime())}</h2>"
-    body += f"<h3>共有{length}个账号签到，总签到时间：{format_time(total_sign_time)}秒</h3><br>"
+    body += f"<h3>共有{length}个账号签到，总签到时间：{format_time(total_sign_time)}</h3>"
     
     body += """
     <style>
