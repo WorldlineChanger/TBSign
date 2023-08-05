@@ -6,6 +6,7 @@ import time
 import copy
 import logging
 import random
+import time
 
 import smtplib
 from email.mime.text import MIMEText
@@ -173,6 +174,16 @@ def client_sign(bduss, tbs, fid, kw):
     res = s.post(url=SIGN_URL, data=data, timeout=10).json()
     return res
 
+def format_time(seconds):
+    # 将秒数格式化为几分几秒的形式
+    minutes = seconds // 60
+    remaining_seconds = seconds % 60
+
+    if minutes > 0:
+        return f"{minutes}分{remaining_seconds}秒"
+    else:
+        return f"{remaining_seconds}秒"
+
 def send_email(sign_list, total_sign_time):
     if ('HOST' not in ENV or 'FROM' not in ENV or 'TO' not in ENV or 'AUTH' not in ENV):
         logger.error("未配置邮箱")
@@ -182,11 +193,11 @@ def send_email(sign_list, total_sign_time):
     TO = ENV['TO'].split('#')
     AUTH = ENV['AUTH']
     length = len(sign_list)
-    subject = f"{time.strftime('%Y-%m-%d', time.localtime())} 签到{length}个贴吧"
+    subject = f"{time.strftime('%Y-%m-%d', time.localtime())} 签到{length}个贴吧账号"
     
     # 邮件正文加入账号信息和总签到时间
     body = f"<h2 style='color: #66ccff;'>签到报告 - {time.strftime('%Y年%m月%d日', time.localtime())}</h2>"
-    body += f"共有{length}个账号签到，总签到时间：{total_sign_time}秒<br>"
+    body += f"<h3>共有{length}个账号签到，总签到时间：{format_time(total_sign_time)}秒</h3><br>"
     
     body += """
     <style>
@@ -203,7 +214,7 @@ def send_email(sign_list, total_sign_time):
     
     for idx, user_favorites in enumerate(sign_list):
         # 标记用户账号（第几个账号）
-        body += f"<br>账号{idx+1}的签到信息：<br>"
+        body += f"<br><b>账号{idx+1}的签到信息：</b><br><br>"
         
         for i in user_favorites:
             body += f"""
