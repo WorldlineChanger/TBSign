@@ -10,6 +10,11 @@ on:
 jobs:
   tieba_sign:
     runs-on: ubuntu-latest
+    strategy:
+      max-parallel: 1
+      fail-fast: false
+      retry:
+        max-attempts: 1
     steps:
       - name: 'Checkout codes'
         uses: actions/checkout@v2
@@ -26,8 +31,6 @@ jobs:
           FROM: ${{ secrets.FROM }}
           TO: ${{ secrets.TO }}
           AUTH: ${{ secrets.AUTH }}
-        retry-on-error: true  # 错误重试
-        retries: 2            
         run: python main.py
       - name: Append Success Log  # 追加成功日志
         run: |
