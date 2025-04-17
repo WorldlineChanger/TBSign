@@ -52,19 +52,38 @@ KW = "kw"
 s = requests.Session()
 
 
+# def get_tbs(bduss):
+#     logger.info("获取tbs开始")
+#     headers = copy.copy(HEADERS)
+#     headers.update({COOKIE: EMPTY_STR.join([BDUSS, EQUAL, bduss])})
+#     try:
+#         tbs = s.get(url=TBS_URL, headers=headers, timeout=5).json()[TBS]
+#     except Exception as e:
+#         logger.error("获取tbs出错" + str(e))
+#         logger.info("重新获取tbs开始")
+#         tbs = s.get(url=TBS_URL, headers=headers, timeout=5).json()[TBS]
+#     logger.info("获取tbs结束")
+#     return tbs
+
 def get_tbs(bduss):
     logger.info("获取tbs开始")
     headers = copy.copy(HEADERS)
     headers.update({COOKIE: EMPTY_STR.join([BDUSS, EQUAL, bduss])})
-    try:
-        tbs = s.get(url=TBS_URL, headers=headers, timeout=5).json()[TBS]
-    except Exception as e:
-        logger.error("获取tbs出错" + str(e))
-        logger.info("重新获取tbs开始")
-        tbs = s.get(url=TBS_URL, headers=headers, timeout=5).json()[TBS]
-    logger.info("获取tbs结束")
-    return tbs
-
+    
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            response = s.get(url=TBS_URL, headers=headers, timeout=5)
+            response.raise_for_status()
+            tbs = response.json()[TBS]
+            logger.info("获取tbs结束")
+            return tbs
+        except (requests.exceptions.RequestException, KeyError) as e:
+            logger.warning(f"获取tbs第 {attempt + 1} 次失败，原因: {str(e)}")
+            if attempt == max_retries - 1:
+                logger.error("获取tbs失败，签到中止")
+                raise  # 抛出异常让外层处理
+            time.sleep(2)
 
 def get_favorite(bduss):
     logger.info("获取关注的贴吧开始")
@@ -164,14 +183,43 @@ def encodeData(data):
     return data
 
 
+# def client_sign(bduss, tbs, fid, kw):
+#     # 客户端签到
+#     logger.info("开始签到贴吧：" + kw)
+#     data = copy.copy(SIGN_DATA)
+#     data.update({BDUSS: bduss, FID: fid, KW: kw, TBS: tbs, TIMESTAMP: str(int(time.time()))})
+#     data = encodeData(data)
+#     res = s.post(url=SIGN_URL, data=data, timeout=10).json()
+#     return res
+
 def client_sign(bduss, tbs, fid, kw):
     # 客户端签到
     logger.info("开始签到贴吧：" + kw)
     data = copy.copy(SIGN_DATA)
     data.update({BDUSS: bduss, FID: fid, KW: kw, TBS: tbs, TIMESTAMP: str(int(time.time()))})
     data = encodeData(data)
-    res = s.post(url=SIGN_URL, data=data, timeout=10).json()
-    return res
+    
+    max_retries = 3  # 最大重试次数
+    retry_delay = 5  # 重试间隔（秒）
+    
+    for attempt in range(max_retries):
+        try:
+            response = s.post(url=SIGN_URL, data=data, timeout=10)
+            response.raise_for_status()  # 检查HTTP状态码
+            res = response.json()  # 解析JSON
+            return res
+        except (requests.exceptions.Timeout, requests.exceptions.HTTPError, requests.exceptions.JSONDecodeError) as e:
+            logger.warning(f"签到贴吧 {kw} 第 {attempt + 1} 次失败，原因: {str(e)}")
+            if attempt == max_retries - 1:
+                logger.error(f"贴吧 {kw} 签到失败，已达最大重试次数")
+                return {"error": "Max retries exceeded"}
+            time.sleep(retry_delay)
+        except Exception as e:
+            logger.error(f"贴吧 {kw} 签到发生未知错误: {str(e)}")
+            return {"error": "Unexpected error"}
+    
+    return {"error": "Unknown error"}
+
 
 def format_time(seconds):
     # 转换时间格式
