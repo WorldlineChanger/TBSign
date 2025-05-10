@@ -9,6 +9,7 @@ import random
 
 import smtplib
 from email.mime.text import MIMEText
+from urllib.parse import quote
 
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -111,7 +112,7 @@ def get_favorite(bduss):
     try:
         res = s.post(url=LIKIE_URL, data=data, timeout=10).json()
     except Exception as e:
-        logger.error("获取关注的贴吧出错" + e)
+        logger.error("获取关注的贴吧出错: %s", e)
         return []
     returnData = res
     if 'forum_list' not in returnData:
@@ -142,7 +143,7 @@ def get_favorite(bduss):
         try:
             res = s.post(url=LIKIE_URL, data=data, timeout=10).json()
         except Exception as e:
-            logger.error("获取关注的贴吧出错" + e)
+            logger.error("获取关注的贴吧出错: %s", e)
             continue
         if 'forum_list' not in res:
             continue
@@ -186,19 +187,53 @@ def encodeData(data):
     return data
 
 
-def get_fid_by_name(bduss, kw):
-    """根据吧名获取fid"""
+def get_fid_by_name(bduss: str, kw: str) -> str:
+    """
+    根据吧名获取 fid：
+      1. 去掉末尾的“吧”字
+      2. 调用分享接口并解析 JSON 返回的 data.fid
+    """
+    
+    # 1. 去掉“吧”后缀
+    name = kw.rstrip("吧")  # 防止接口对带“吧”的名称返回空
+
+    # 2. 构造接口并对 name 做 percent-encoding
+    url = (
+        "http://tieba.baidu.com/f/commit/share/fnameShareApi"
+        f"?ie=utf-8&fname={quote(name)}"
+    )
+
+    # 3. 发起请求 提取 fid
+    headers = {
+        'Host': 'tieba.baidu.com',
+        'User-Agent': 'Mozilla/5.0',
+        'Cookie': f"BDUSS={bduss}"
+    }
     try:
-        headers = copy.copy(HEADERS)
-        headers[COOKIE] = f"{BDUSS}={bduss}"
-        params = {'kw': kw}
-        res = s.get("http://tieba.baidu.com/f/commit/share/fnameShareApi",
-                    headers=headers, params=params, timeout=5)
-        res.raise_for_status()
-        return res.json()['data']['fid']
+        resp = s.get(url, headers=headers, timeout=5)
+        resp.raise_for_status()
+        data = resp.json().get('data', {})
+        fid = data.get('fid')
+        if not fid:
+            raise ValueError(f"接口返回 data 中缺少 fid：{data}")
+        return str(fid)
     except Exception as e:
-        logger.error(f"获取吧名 {kw} 的fid失败：{str(e)}")
-        raise  # 抛出异常中断
+        logger.error(f"获取吧名 {kw!r} 的 fid 失败：{e}")
+        raise
+
+# def get_fid_by_name(bduss, kw):
+#     """根据吧名获取fid"""
+#     try:
+#         headers = copy.copy(HEADERS)
+#         headers[COOKIE] = f"{BDUSS}={bduss}"
+#         params = {'kw': kw}
+#         res = s.get("http://tieba.baidu.com/f/commit/share/fnameShareApi",
+#                     headers=headers, params=params, timeout=5)
+#         res.raise_for_status()
+#         return res.json()['data']['fid']
+#     except Exception as e:
+#         logger.error(f"获取吧名 {kw} 的fid失败：{str(e)}")
+#         raise  # 抛出异常中断
 
 
 # def client_sign(bduss, tbs, fid, kw):

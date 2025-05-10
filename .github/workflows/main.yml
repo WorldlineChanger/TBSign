@@ -26,6 +26,9 @@ jobs:
           FROM: ${{ secrets.FROM }}
           TO: ${{ secrets.TO }}
           AUTH: ${{ secrets.AUTH }}
+          MODERATED_BARS: ${{ secrets.MODERATED_BARS }}
+          MODERATOR_BDUSS_INDEX: ${{ secrets.MODERATOR_BDUSS_INDEX }}
+          TARGET_POST_IDS: ${{ secrets.TARGET_POST_IDS }}
         run: python main.py
       - name: Append Success Log  # 追加成功日志
         run: |
