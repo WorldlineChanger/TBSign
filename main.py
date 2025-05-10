@@ -238,8 +238,10 @@ def client_sign(bduss, tbs, fid, kw):
     
     for attempt in range(max_retries):
         try:
-            response = s.post(url=SIGN_URL, data=data, timeout=10)
+            response = s.post(url=SIGN_URL, headers=HEADERS, cookies={'BDUSS':bduss}, data=data, timeout=10)
             response.raise_for_status()  # 检查HTTP状态码
+            if not response.text:
+                return {'error_code': 0}
             res = response.json()  # 解析JSON
             return res
         except (requests.exceptions.Timeout, requests.exceptions.HTTPError, requests.exceptions.JSONDecodeError) as e:
@@ -279,6 +281,7 @@ def moderator_task(bduss, tbs, bar_name, post_id):
     }
     try:
         # 发帖
+        time.sleep(3)
         resp = s.post(REPLY_URL,
                       data=encodeData(reply_data),
                       headers=headers,
@@ -308,7 +311,7 @@ def moderator_task(bduss, tbs, bar_name, post_id):
                                   headers=headers,
                                   cookies=cookies,
                                   timeout=10)
-                logger.info("删除响应 status=%s", del_resp.status_code)
+                logger.info("删除回复 status=%s", del_resp.status_code)
                 del_resp.raise_for_status()
                 try:
                     dj = del_resp.json()
@@ -476,8 +479,19 @@ def main():
         all_favorites.append(favorites)  # 将每个用户的关注贴吧添加到 all_favorites 列表中
 
         if str(n-1) == ENV.get('MODERATOR_BDUSS_INDEX', '0'):
-            moderated_bars = ENV.get('MODERATED_BARS', '').split(',')
-            target_posts = ENV.get('TARGET_POST_IDS', '').split(',')
+            # 1. 拆分并 strip 空白，去空字符串
+            raw_bars = [b.strip() for b in ENV.get('MODERATED_BARS', '').split(',') if b.strip()]
+            raw_posts = [p.strip() for p in ENV.get('TARGET_POST_IDS', '').split(',') if p.strip()]
+
+            # 2. 去重，确保每个吧和帖子只执行一次
+            seen = set()
+            moderated_bars = []
+            target_posts = []
+            for bar, post in zip(raw_bars, raw_posts):
+                if bar not in seen:
+                    seen.add(bar)
+                    moderated_bars.append(bar)
+                    target_posts.append(post)
             
             for bar_name, post_id in zip(moderated_bars, target_posts):
                 logger.info(f"开始处理吧主考核：{bar_name}")
