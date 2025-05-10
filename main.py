@@ -18,6 +18,9 @@ logger = logging.getLogger(__name__)
 LIKIE_URL = "http://c.tieba.baidu.com/c/f/forum/like"
 TBS_URL = "http://tieba.baidu.com/dc/common/tbs"
 SIGN_URL = "http://c.tieba.baidu.com/c/c/forum/sign"
+REPLY_URL = "http://c.tieba.baidu.com/c/c/post/add"
+DELETE_URL = "http://c.tieba.baidu.com/c/c/post/delete"
+SET_TOP_URL = "http://c.tieba.baidu.com/c/c/bawu/setTopThread"
 
 ENV = os.environ
 
@@ -183,6 +186,21 @@ def encodeData(data):
     return data
 
 
+def get_fid_by_name(bduss, kw):
+    """根据吧名获取fid"""
+    try:
+        headers = copy.copy(HEADERS)
+        headers[COOKIE] = f"{BDUSS}={bduss}"
+        params = {'kw': kw}
+        res = s.get("http://tieba.baidu.com/f/commit/share/fnameShareApi",
+                    headers=headers, params=params, timeout=5)
+        res.raise_for_status()
+        return res.json()['data']['fid']
+    except Exception as e:
+        logger.error(f"获取吧名 {kw} 的fid失败：{str(e)}")
+        raise  # 抛出异常中断
+
+
 # def client_sign(bduss, tbs, fid, kw):
 #     # 客户端签到
 #     logger.info("开始签到贴吧：" + kw)
@@ -221,6 +239,72 @@ def client_sign(bduss, tbs, fid, kw):
     return {"error": "Unknown error"}
 
 
+def moderator_task(bduss, tbs, bar_name, post_id):
+    """执行吧主考核任务"""
+    try:
+        fid = get_fid_by_name(bduss, bar_name)
+        
+        # 操作状态追踪
+        success_flag = {
+            'reply': False,
+            'top': False
+        }
+        
+        # 回复并删除
+        try:
+            reply_data = {
+                BDUSS: bduss,
+                'content': '#(滑稽)',
+                'fid': fid,
+                'tid': post_id,
+                'vcode_tag':'11',
+                'tbs': tbs
+            }
+            reply_res = s.post(REPLY_URL, data=encodeData(reply_data)).json()
+            if reply_res.get('error_code') == '0':
+                delete_data = {
+                    BDUSS: bduss,
+                    'post_id': reply_res['data']['post_id'],  # 使用实际post_id
+                    'tbs': tbs
+                }
+                s.post(DELETE_URL, data=encodeData(delete_data))
+                success_flag['reply'] = True
+        except Exception as e:
+            logger.error(f"回复操作失败：{str(e)}")
+        
+        # 置顶
+        try:
+            set_top_data = {
+                BDUSS: bduss,
+                'fid': fid,
+                'tid': post_id,
+                'type': '1',
+                'tbs': tbs
+            }
+            if s.post(SET_TOP_URL, data=encodeData(set_top_data)).json().get('error_code') == '0':
+                success_flag['top'] = True
+        except Exception as e:
+            logger.error(f"置顶操作失败：{str(e)}")
+        
+        # 取消置顶
+        try:
+            cancel_top_data = {
+                BDUSS: bduss,
+                'fid': fid,
+                'tid': post_id,
+                'type': '0',  # 必须修改type值
+                'tbs': tbs
+            }
+            s.post(SET_TOP_URL, data=encodeData(cancel_top_data))
+        except Exception as e:
+            logger.error(f"取消置顶失败：{str(e)}")
+
+        return success_flag
+    except Exception as e:
+        logger.error(f"吧主任务整体执行失败：{str(e)}")
+        return {'reply': False, 'top': False}
+
+
 def format_time(seconds):
     # 转换时间格式
     minutes = seconds // 60
@@ -231,7 +315,8 @@ def format_time(seconds):
     else:
         return f"{remaining_seconds}秒"
 
-def send_email(sign_list, total_sign_time):
+def send_email(sign_list, total_sign_time, task_status):
+    moderated_bars = ENV.get('MODERATED_BARS', '').split(',') if 'MODERATED_BARS' in ENV else []
     if ('HOST' not in ENV or 'FROM' not in ENV or 'TO' not in ENV or 'AUTH' not in ENV):
         logger.error("未配置邮箱")
         return
@@ -245,6 +330,16 @@ def send_email(sign_list, total_sign_time):
     # 邮件正文加入账号信息和总签到时间
     body = f"<h2 style='color: #66ccff;'>签到报告 - {time.strftime('%Y年%m月%d日', time.localtime())}</h2>"
     body += f"<h3>共有{length}个账号签到，总签到时间：{format_time(total_sign_time)}</h3>"
+    
+    if moderated_bars:
+        body += "<h3>吧主考核任务执行情况：</h3>"
+        for bar_name, status in zip(moderated_bars, task_status):
+            icon = "✅" if status['reply'] or status['top'] else "❌"
+            body += f"""<div class="child">
+                {bar_name}：{icon}<br>
+                发帖操作：{"成功" if status['reply'] else "失败"}<br>
+                置顶操作：{"成功" if status['top'] else "失败"}
+            </div>"""
     
     body += """
     <style>
@@ -295,6 +390,7 @@ def main():
     b = ENV['BDUSS'].split('#')
     all_favorites = []  # 创建空列表存储所有用户的关注贴吧
     total_sign_time = 0  # 总签到时间
+    task_status = []  # 初始化任务状态列表
     for n, i in enumerate(b, start=1):
         logger.info("开始签到第" + str(n) + "个用户")
         start_time = time.time()  # 记录用户签到开始时间
@@ -308,7 +404,17 @@ def main():
         total_sign_time += int(end_time - start_time)  # 计算用户签到时间并累加到总签到时间
         all_favorites.append(favorites)  # 将每个用户的关注贴吧添加到 all_favorites 列表中
 
-    send_email(all_favorites, total_sign_time)  # 将包含所有用户关注贴吧的列表和总签到时间传递
+        if str(n-1) == ENV.get('MODERATOR_BDUSS_INDEX', '0'):
+            moderated_bars = ENV.get('MODERATED_BARS', '').split(',')
+            target_posts = ENV.get('TARGET_POST_IDS', '').split(',')
+            
+            for bar_name, post_id in zip(moderated_bars, target_posts):
+                logger.info(f"开始处理吧主考核：{bar_name}")
+                status = moderator_task(i, tbs, bar_name.strip(), post_id.strip())
+                task_status.append(status)  # 收集状态
+                time.sleep(5)
+
+    send_email(all_favorites, total_sign_time, task_status)  # 将包含所有用户关注贴吧的列表和总签到时间传递
     logger.info("所有用户签到结束")
 
 
