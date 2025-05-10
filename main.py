@@ -211,11 +211,11 @@ def get_fid_by_name(bduss: str, kw: str) -> str:
     # 3. 发起请求 提取 fid
     headers = {
         'Host': 'tieba.baidu.com',
-        'User-Agent': 'Mozilla/5.0',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/39.0.2171.71 Safari/537.36',
         'Cookie': f"BDUSS={bduss}"
     }
     try:
-        resp = s.get(url, headers=headers, timeout=5)
+        resp = s.get(url, headers=headers, timeout=10)
         resp.raise_for_status()
         data = resp.json().get('data', {})
         fid = data.get('fid')
@@ -225,30 +225,6 @@ def get_fid_by_name(bduss: str, kw: str) -> str:
     except Exception as e:
         logger.error(f"获取吧名 {kw!r} 的 fid 失败：{e}")
         raise
-
-# def get_fid_by_name(bduss, kw):
-#     """根据吧名获取fid"""
-#     try:
-#         headers = copy.copy(HEADERS)
-#         headers[COOKIE] = f"{BDUSS}={bduss}"
-#         params = {'kw': kw}
-#         res = s.get("http://tieba.baidu.com/f/commit/share/fnameShareApi",
-#                     headers=headers, params=params, timeout=5)
-#         res.raise_for_status()
-#         return res.json()['data']['fid']
-#     except Exception as e:
-#         logger.error(f"获取吧名 {kw} 的fid失败：{str(e)}")
-#         raise  # 抛出异常中断
-
-
-# def client_sign(bduss, tbs, fid, kw):
-#     # 客户端签到
-#     logger.info("开始签到贴吧：" + kw)
-#     data = copy.copy(SIGN_DATA)
-#     data.update({BDUSS: bduss, FID: fid, KW: kw, TBS: tbs, TIMESTAMP: str(int(time.time()))})
-#     data = encodeData(data)
-#     res = s.post(url=SIGN_URL, data=data, timeout=10).json()
-#     return res
 
 def client_sign(bduss, tbs, fid, kw):
     # 客户端签到
@@ -304,11 +280,11 @@ def moderator_task(bduss, tbs, bar_name, post_id):
         resp.raise_for_status()
         jr = resp.json()
     
-        if jr.get('error_code') == '0':
+        if str(jr.get('error_code', '')) == '0':
             success_flag['reply'] = True
         
-            # 若返回 post_id，则执行删除
-            pid = jr.get('data', {}).get('post_id')
+            # 先从嵌套 data 取，再从顶层 pid 取
+            pid = jr.get('data', {}).get('post_id') or jr.get('pid')
             if pid:
                 time.sleep(3)
                 delete_data = {
@@ -316,13 +292,13 @@ def moderator_task(bduss, tbs, bar_name, post_id):
                     'post_id': pid,
                     'tbs': tbs
                 }
-                del_resp = s.post(DELETE_URL, data=encodeData(delete_data), timeout=5)
+                del_resp = s.post(DELETE_URL, data=encodeData(delete_data), timeout=10)
                 del_resp.raise_for_status()
                 dj = del_resp.json()
                 if dj.get('error_code') != '0':
                     logger.error("删除操作返回非0：%r", dj)
             else:
-                logger.error("回复成功却未返回 post_id：%r", jr)
+                logger.error("回复成功却未返回 post_id/pid：%r", jr)
         else:
             logger.error("回复操作失败，接口返回：%r", jr)
 
@@ -337,11 +313,20 @@ def moderator_task(bduss, tbs, bar_name, post_id):
         top_data = {'BDUSS': bduss, 'fid': fid, 'tid': post_id, 'type': '1', 'tbs': tbs}
         resp = s.post(SET_TOP_URL, data=encodeData(top_data), timeout=10)
         resp.raise_for_status()
-        jr = resp.json()
-        if jr.get('error_code') == '0':
+        text = resp.text.strip()
+        if not text:
+            # 空响应，视为操作成功
             success_flag['top'] = True
         else:
-            logger.error("置顶操作失败：%r", jr)
+            try:
+                jr = resp.json()
+            except JSONDecodeError:
+                logger.warning("置顶接口返回非 JSON 内容：%r", text)
+            else:
+                if jr.get('error_code') == '0':
+                    success_flag['top'] = True
+                else:
+                    logger.error("置顶操作失败，接口返回：%r", jr)
     except requests.exceptions.RequestException as e:
         logger.error("HTTP 异常，置顶阶段：%s", e)
 
