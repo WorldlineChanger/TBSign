@@ -111,7 +111,7 @@ def get_favorite(bduss):
     }
     data = encodeData(data)
     try:
-        res = s.post(url=LIKIE_URL, data=data, timeout=10)
+        resp = s.post(url=LIKIE_URL, data=data, timeout=10)
         resp.raise_for_status()
         res = resp.json()
     except Exception as e:
@@ -144,7 +144,7 @@ def get_favorite(bduss):
         }
         data = encodeData(data)
         try:
-            res = s.post(url=LIKIE_URL, data=data, timeout=10)
+            resp = s.post(url=LIKIE_URL, data=data, timeout=10)
             resp.raise_for_status()
             res = resp.json()
         except Exception as e:
@@ -299,28 +299,36 @@ def moderator_task(bduss, tbs, bar_name, post_id):
         'tbs': tbs
     }
     try:
+        # 发帖
         resp = s.post(REPLY_URL, data=encodeData(reply_data), timeout=10)
         resp.raise_for_status()
         jr = resp.json()
+    
         if jr.get('error_code') == '0':
             success_flag['reply'] = True
-            # 删除回复
-            time.sleep(3)
-            delete_data = {
-                'BDUSS': bduss,
-                'post_id': jr['data']['post_id'],
-                'tbs': tbs
-            }
-            del_resp = s.post(DELETE_URL, data=encodeData(delete_data), timeout=10)
-            del_resp.raise_for_status()
-            dj = del_resp.json()
-            if dj.get('error_code') != '0':
-                logger.error("删除操作返回非 0：%r", dj)
+        
+            # 若返回 post_id，则执行删除
+            pid = jr.get('data', {}).get('post_id')
+            if pid:
+                time.sleep(3)
+                delete_data = {
+                    'BDUSS': bduss,
+                    'post_id': pid,
+                    'tbs': tbs
+                }
+                del_resp = s.post(DELETE_URL, data=encodeData(delete_data), timeout=5)
+                del_resp.raise_for_status()
+                dj = del_resp.json()
+                if dj.get('error_code') != '0':
+                    logger.error("删除操作返回非0：%r", dj)
+            else:
+                logger.error("回复成功却未返回 post_id：%r", jr)
         else:
             logger.error("回复操作失败，接口返回：%r", jr)
+
     except requests.exceptions.RequestException as e:
         logger.error("HTTP 异常，回复/删除阶段：%s", e)
-    except ValueError as e:
+    except JSONDecodeError as e:
         logger.error("JSON 解析失败，回复/删除阶段：%s", e)
 
     # 2. 置顶
