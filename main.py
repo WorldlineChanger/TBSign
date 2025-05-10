@@ -259,6 +259,9 @@ def moderator_task(bduss, tbs, bar_name, post_id):
     """执行吧主考核任务"""
     success_flag = {'reply': False, 'top': False}
 
+    cookies = { 'BDUSS': bduss }
+    headers = copy.copy(HEADERS)
+
     try:
         fid = get_fid_by_name(bduss, bar_name)
     except Exception as e:
@@ -276,7 +279,11 @@ def moderator_task(bduss, tbs, bar_name, post_id):
     }
     try:
         # 发帖
-        resp = s.post(REPLY_URL, data=encodeData(reply_data), timeout=10)
+        resp = s.post(REPLY_URL,
+                      data=encodeData(reply_data),
+                      headers=headers,
+                      cookies=cookies,
+                      timeout=10)
         resp.raise_for_status()
         jr = resp.json()
     
@@ -285,6 +292,9 @@ def moderator_task(bduss, tbs, bar_name, post_id):
         
             # 先从嵌套 data 取，再从顶层 pid 取
             pid = jr.get('data', {}).get('post_id') or jr.get('pid')
+            logger.info("回复成功，post_id=%s", pid)
+
+            # 删除
             if pid:
                 time.sleep(3)
                 delete_data = {
@@ -292,11 +302,22 @@ def moderator_task(bduss, tbs, bar_name, post_id):
                     'post_id': pid,
                     'tbs': tbs
                 }
-                del_resp = s.post(DELETE_URL, data=encodeData(delete_data), timeout=10)
+                # 通过 cookies 递交 BDUSS，并优雅处理空响应
+                del_resp = s.post(DELETE_URL,
+                                  data=encodeData(delete_data),
+                                  headers=headers,
+                                  cookies=cookies,
+                                  timeout=10)
+                logger.info("删除响应 status=%s", del_resp.status_code)
                 del_resp.raise_for_status()
-                dj = del_resp.json()
-                if dj.get('error_code') != '0':
-                    logger.error("删除操作返回非0：%r", dj)
+                try:
+                    dj = del_resp.json()
+                    if dj.get('error_code') != '0':
+                        logger.error("删除操作返回非0：%r", dj)
+                    else:
+                        logger.info("删除成功，pid=%s", pid)
+                except JSONDecodeError:
+                    logger.info("删除接口无 JSON 返回，视为成功，pid=%s", pid)
             else:
                 logger.error("回复成功却未返回 post_id/pid：%r", jr)
         else:
@@ -311,20 +332,27 @@ def moderator_task(bduss, tbs, bar_name, post_id):
     time.sleep(3)
     try:
         top_data = {'BDUSS': bduss, 'fid': fid, 'tid': post_id, 'type': '1', 'tbs': tbs}
-        resp = s.post(SET_TOP_URL, data=encodeData(top_data), timeout=10)
+        resp = s.post(SET_TOP_URL,
+                      data=encodeData(top_data),
+                      headers=headers,
+                      cookies=cookies,
+                      timeout=10)
+        logger.info("置顶响应 status=%s", resp.status_code)
         resp.raise_for_status()
         text = resp.text.strip()
         if not text:
             # 空响应，视为操作成功
             success_flag['top'] = True
+            logger.info("置顶空响应，视为成功，tid=%s", post_id)
         else:
             try:
                 jr = resp.json()
             except JSONDecodeError:
-                logger.warning("置顶接口返回非 JSON 内容：%r", text)
+                logger.warning("置顶接口返回非 JSON 内容，text=%r", text)
             else:
                 if jr.get('error_code') == '0':
                     success_flag['top'] = True
+                    logger.info("置顶操作返回 error_code=0，成功，tid=%s", post_id)
                 else:
                     logger.error("置顶操作失败，接口返回：%r", jr)
     except requests.exceptions.RequestException as e:
@@ -334,8 +362,14 @@ def moderator_task(bduss, tbs, bar_name, post_id):
     time.sleep(3)
     try:
         cancel_data = {'BDUSS': bduss, 'fid': fid, 'tid': post_id, 'type': '0', 'tbs': tbs}
-        resp = s.post(SET_TOP_URL, data=encodeData(cancel_data), timeout=10)
+        resp = s.post(SET_TOP_URL,
+                      data=encodeData(cancel_data),
+                      headers=headers,
+                      cookies=cookies,
+                      timeout=10)
+        logger.info("取消置顶响应 status=%s", resp.status_code)
         resp.raise_for_status()
+        logger.info("取消置顶成功，tid=%s", post_id)
     except Exception as e:
         logger.warning("取消置顶失败：%s", e)
 
