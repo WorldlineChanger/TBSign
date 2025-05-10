@@ -10,6 +10,7 @@ import random
 import smtplib
 from email.mime.text import MIMEText
 from urllib.parse import quote
+from json import JSONDecodeError
 
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -110,7 +111,9 @@ def get_favorite(bduss):
     }
     data = encodeData(data)
     try:
-        res = s.post(url=LIKIE_URL, data=data, timeout=10).json()
+        res = s.post(url=LIKIE_URL, data=data, timeout=10)
+        resp.raise_for_status()
+        res = resp.json()
     except Exception as e:
         logger.error("获取关注的贴吧出错: %s", e)
         return []
@@ -141,7 +144,9 @@ def get_favorite(bduss):
         }
         data = encodeData(data)
         try:
-            res = s.post(url=LIKIE_URL, data=data, timeout=10).json()
+            res = s.post(url=LIKIE_URL, data=data, timeout=10)
+            resp.raise_for_status()
+            res = resp.json()
         except Exception as e:
             logger.error("获取关注的贴吧出错: %s", e)
             continue
@@ -276,68 +281,72 @@ def client_sign(bduss, tbs, fid, kw):
 
 def moderator_task(bduss, tbs, bar_name, post_id):
     """执行吧主考核任务"""
+    success_flag = {'reply': False, 'top': False}
+
     try:
         fid = get_fid_by_name(bduss, bar_name)
-        
-        # 操作状态追踪
-        success_flag = {
-            'reply': False,
-            'top': False
-        }
-        
-        # 回复并删除
-        try:
-            reply_data = {
-                BDUSS: bduss,
-                'content': '#(滑稽)',
-                'fid': fid,
-                'tid': post_id,
-                'vcode_tag':'11',
-                'tbs': tbs
-            }
-            reply_res = s.post(REPLY_URL, data=encodeData(reply_data)).json()
-            if reply_res.get('error_code') == '0':
-                delete_data = {
-                    BDUSS: bduss,
-                    'post_id': reply_res['data']['post_id'],  # 使用实际post_id
-                    'tbs': tbs
-                }
-                s.post(DELETE_URL, data=encodeData(delete_data))
-                success_flag['reply'] = True
-        except Exception as e:
-            logger.error(f"回复操作失败：{str(e)}")
-        
-        # 置顶
-        try:
-            set_top_data = {
-                BDUSS: bduss,
-                'fid': fid,
-                'tid': post_id,
-                'type': '1',
-                'tbs': tbs
-            }
-            if s.post(SET_TOP_URL, data=encodeData(set_top_data)).json().get('error_code') == '0':
-                success_flag['top'] = True
-        except Exception as e:
-            logger.error(f"置顶操作失败：{str(e)}")
-        
-        # 取消置顶
-        try:
-            cancel_top_data = {
-                BDUSS: bduss,
-                'fid': fid,
-                'tid': post_id,
-                'type': '0',  # 必须修改type值
-                'tbs': tbs
-            }
-            s.post(SET_TOP_URL, data=encodeData(cancel_top_data))
-        except Exception as e:
-            logger.error(f"取消置顶失败：{str(e)}")
-
-        return success_flag
     except Exception as e:
-        logger.error(f"吧主任务整体执行失败：{str(e)}")
-        return {'reply': False, 'top': False}
+        logger.error("获取 fid 失败，跳过吧主任务：%s", e)
+        return success_flag
+
+    # 1. 回复并删除
+    reply_data = {
+        'BDUSS': bduss,
+        'content': '#(滑稽)',
+        'fid': fid,
+        'tid': post_id,
+        'vcode_tag': '11',
+        'tbs': tbs
+    }
+    try:
+        resp = s.post(REPLY_URL, data=encodeData(reply_data), timeout=10)
+        resp.raise_for_status()
+        jr = resp.json()
+        if jr.get('error_code') == '0':
+            success_flag['reply'] = True
+            # 删除回复
+            time.sleep(3)
+            delete_data = {
+                'BDUSS': bduss,
+                'post_id': jr['data']['post_id'],
+                'tbs': tbs
+            }
+            del_resp = s.post(DELETE_URL, data=encodeData(delete_data), timeout=10)
+            del_resp.raise_for_status()
+            dj = del_resp.json()
+            if dj.get('error_code') != '0':
+                logger.error("删除操作返回非 0：%r", dj)
+        else:
+            logger.error("回复操作失败，接口返回：%r", jr)
+    except requests.exceptions.RequestException as e:
+        logger.error("HTTP 异常，回复/删除阶段：%s", e)
+    except ValueError as e:
+        logger.error("JSON 解析失败，回复/删除阶段：%s", e)
+
+    # 2. 置顶
+    time.sleep(3)
+    try:
+        top_data = {'BDUSS': bduss, 'fid': fid, 'tid': post_id, 'type': '1', 'tbs': tbs}
+        resp = s.post(SET_TOP_URL, data=encodeData(top_data), timeout=10)
+        resp.raise_for_status()
+        jr = resp.json()
+        if jr.get('error_code') == '0':
+            success_flag['top'] = True
+        else:
+            logger.error("置顶操作失败：%r", jr)
+    except requests.exceptions.RequestException as e:
+        logger.error("HTTP 异常，置顶阶段：%s", e)
+
+    # 3. 取消置顶（不影响 success_flag）
+    time.sleep(3)
+    try:
+        cancel_data = {'BDUSS': bduss, 'fid': fid, 'tid': post_id, 'type': '0', 'tbs': tbs}
+        resp = s.post(SET_TOP_URL, data=encodeData(cancel_data), timeout=10)
+        resp.raise_for_status()
+    except Exception as e:
+        logger.warning("取消置顶失败：%s", e)
+
+    return success_flag
 
 
 def format_time(seconds):
