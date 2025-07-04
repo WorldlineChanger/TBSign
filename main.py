@@ -271,9 +271,13 @@ def moderator_task(bduss, tbs, bar_name, post_id):
         return success_flag
 
     # 1. 回复并删除
+    # 生成带当前时间的内容
+    current_time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+    reply_content = f"{current_time_str} #(滑稽)"
+    
     reply_data = {
         'BDUSS': bduss,
-        'content': '#(滑稽)',
+        'content': reply_content, # 使用新的内容
         'fid': fid,
         'tid': post_id,
         'vcode_tag': '11',
@@ -295,7 +299,7 @@ def moderator_task(bduss, tbs, bar_name, post_id):
         
             # 先从嵌套 data 取，再从顶层 pid 取
             pid = jr.get('data', {}).get('post_id') or jr.get('pid')
-            logger.info("回复成功，post_id=%s", pid)
+            logger.info("回复成功，post_id=%s，内容: %s", pid, reply_content) # 日志中也记录下发送内容
 
             # 删除
             if pid:
