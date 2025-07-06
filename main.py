@@ -131,62 +131,87 @@ def get_tbs(bduss):
     raise RuntimeError("TBS 获取失败")
 
 # -----------------------------
-# 2. 获取关注的贴吧（分页+flatten）
+# 2. 获取关注的贴吧
 # -----------------------------
 def get_favorite(bduss):
     """获取用户关注的贴吧列表，包含分页和嵌套 flatten"""
     logger.info("获取关注的贴吧开始")
     returnData = {}
-    page = 1
-    # 初始请求
+    i = 1
     data = {
         'BDUSS': bduss,
-        '_client_type': '2', '_client_id': 'wappc_1534235498291_488',
-        '_client_version': '9.7.8.0', '_phone_imei': '000000000000000',
-        'from': '1008621y', 'page_no': str(page), 'page_size': '200',
-        'model': 'MI+5', 'net_type': '1',
-        'timestamp': str(int(time.time())), 'vcode_tag': '11',
+        '_client_type': '2',
+        '_client_id': 'wappc_1534235498291_488',
+        '_client_version': '9.7.8.0',
+        '_phone_imei': '000000000000000',
+        'from': '1008621y',
+        'page_no': '1',
+        'page_size': '200',
+        'model': 'MI+5',
+        'net_type': '1',
+        'timestamp': str(int(time.time())),
+        'vcode_tag': '11',
     }
-    resp = s.post(LIKIE_URL, headers=get_headers(), data=encodeData(data), timeout=10)
+    data = encodeData(data)
     try:
+        resp = s.post(url=LIKIE_URL, data=data, timeout=10)
+        resp.raise_for_status()
         res = resp.json()
     except Exception as e:
-        logger.error(f"获取关注的贴吧出错: {e}")
+        logger.error("获取关注的贴吧出错: %s", e)
         return []
     returnData = res
-    returnData.setdefault('forum_list', {})
-    fl = returnData['forum_list'] or {}
-    fl.setdefault('non-gconforum', [])
-    fl.setdefault('gconforum', [])
-    # 分页
-    while res.get('has_more') == '1':
-        page += 1
-        data['page_no'] = str(page)
-        data['timestamp'] = str(int(time.time()))
-        resp = s.post(LIKIE_URL, headers=get_headers(), data=encodeData(data), timeout=10)
+    if 'forum_list' not in returnData:
+        returnData['forum_list'] = []
+    if res['forum_list'] == []:
+        returnData['forum_list'] = {'gconforum': [], 'non-gconforum': []}
+    else:
+        returnData['forum_list'].setdefault('non-gconforum', [])
+        returnData['forum_list'].setdefault('gconforum', [])
+    while 'has_more' in res and res['has_more'] == '1':
+        i += 1
+        data = {
+            'BDUSS': bduss,
+            '_client_type': '2',
+            '_client_id': 'wappc_1534235498291_488',
+            '_client_version': '9.7.8.0',
+            '_phone_imei': '000000000000000',
+            'from': '1008621y',
+            'page_no': str(i),
+            'page_size': '200',
+            'model': 'MI+5',
+            'net_type': '1',
+            'timestamp': str(int(time.time())),
+            'vcode_tag': '11',
+        }
+        data = encodeData(data)
         try:
+            resp = s.post(url=LIKIE_URL, data=data, timeout=10)
+            resp.raise_for_status()
             res = resp.json()
-            fl2 = res.get('forum_list', {})
-            if 'non-gconforum' in fl2:
-                fl['non-gconforum'].append(fl2['non-gconforum'])
-            if 'gconforum' in fl2:
-                fl['gconforum'].append(fl2['gconforum'])
-        except Exception:
-            break
-    # flatten 列表
-    flat = []
+        except Exception as e:
+            logger.error("获取关注的贴吧出错: %s", e)
+            continue
+        flist = res.get('forum_list', {})
+        if 'non-gconforum' in flist:
+            returnData['forum_list']['non-gconforum'].append(flist['non-gconforum'])
+        if 'gconforum' in flist:
+            returnData['forum_list']['gconforum'].append(flist['gconforum'])
+    # flatten 嵌套列表
+    t = []
     for section in ('non-gconforum', 'gconforum'):
-        for item in fl[section]:
+        for item in returnData['forum_list'][section]:
             if isinstance(item, list):
-                for sub in item:
-                    if isinstance(sub, list):
-                        flat.extend(sub)
+                for j in item:
+                    if isinstance(j, list):
+                        for k in j:
+                            t.append(k)
                     else:
-                        flat.append(sub)
+                        t.append(j)
             else:
-                flat.append(item)
-    logger.info(f"获取关注的贴吧结束，共 {len(flat)} 个")
-    return flat
+                t.append(item)
+    logger.info("获取关注的贴吧结束，共 %d 个", len(t))
+    return t
 
 # -----------------------------
 # 3. 客户端签到
@@ -212,21 +237,17 @@ def moderator_task(bduss, tbs, bar_name, post_id):
     success = {'reply': False, 'top': False}
     if not DO_MODERATOR_TASK:
         return success
-    # 获取 fid
     try:
         fid = get_fid_by_name(bduss, bar_name)
     except Exception as e:
         logger.error(f"获取 fid 失败: {e}")
         return success
     cookies = {BDUSS: bduss}
-    # 随机延时
     def rnd_sleep(): time.sleep(random.uniform(3, 8))
-    # 回复 & 删除
     if DO_MODERATOR_POST:
         current_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
         content = f"{current_time} #(滑稽)"
         reply_data = {'BDUSS': bduss, 'content': content, 'fid': fid, 'tid': post_id, 'vcode_tag': '11', 'tbs': tbs}
-        # 增加埋点字段
         reply_data['mouse_pwd_t'] = str(int(time.time() * 1000))
         reply_data['mouse_pwd']   = reply_data['mouse_pwd_t']
         rnd_sleep()
@@ -245,75 +266,100 @@ def moderator_task(bduss, tbs, bar_name, post_id):
                     logger.info(f"删除回复 status={del_resp.status_code}")
         except Exception as e:
             logger.error(f"回复/删除阶段失败: {e}")
-    # 置顶 & 取消置顶
     if DO_MODERATOR_TOP:
         rnd_sleep()
-        # 置顶
         s.get(SET_TOP_URL, headers=get_headers(is_mobile=True), cookies=cookies, params={'tn':'bdTOP','z':post_id,'tbs':tbs,'word':bar_name})
         success['top'] = True
         logger.info(f"置顶尝试完成: {post_id}")
         rnd_sleep()
-        # 取消置顶
         s.get(SET_TOP_URL, headers=get_headers(is_mobile=True), cookies=cookies, params={'tn':'bdUNTOP','z':post_id,'tbs':tbs,'word':bar_name})
         logger.info(f"取消置顶尝试完成: {post_id}")
     return success
 
 # -----------------------------
-# 5. 邮件汇报 & 主函数
+# 5. 邮件汇报函数（恢复原始样式）
+# -----------------------------
+def send_email(sign_list, total_sign_time, task_status):
+    moderated_bars = ENV.get('MODERATED_BARS', '').split(',') if 'MODERATED_BARS' in ENV else []
+    if ('HOST' not in ENV or 'FROM' not in ENV or 'TO' not in ENV or 'AUTH' not in ENV):
+        logger.error("未配置邮箱")
+        return
+    HOST = ENV['HOST']
+    FROM = ENV['FROM']
+    TO = ENV['TO'].split('#')
+    AUTH = ENV['AUTH']
+    length = len(sign_list)
+    subject = f"{time.strftime('%Y-%m-%d')} 签到{length}个贴吧账号"
+    body = f"<h2 style='color: #66ccff;'>签到报告 - {time.strftime('%Y年%m月%d日')}</h2>"
+    body += f"<h3>共有{length}个账号签到，总签到时间：{format_time(total_sign_time)}</h3>"
+    if moderated_bars:
+        body += "<h3>吧主考核任务执行情况：</h3>"
+        for bar_name, status in zip(moderated_bars, task_status):
+            icon = "✅" if status['reply'] or status['top'] else "❌"
+            body += f"""<div class="child">
+                {bar_name}：{icon}<br>
+                发帖操作：{"成功" if status['reply'] else "失败"}<br>
+                置顶操作：{"成功" if status['top'] else "失败"}
+            </div>"""
+    body += """
+    <style>
+    .child {
+      background-color: rgba(173, 216, 230, 0.19);
+      padding: 10px;
+    }
+
+    .child * {
+      margin: 5px;
+    }
+    </style>
+    """
+    for idx, user_favorites in enumerate(sign_list):
+        body += f"<br><b>账号{idx+1}的签到信息：</b><br><br>"
+        for i in user_favorites:
+            body += f"""<div class="child">
+                <div class="name"> 贴吧名称: {i['name']} </div>
+                <div class="slogan"> 贴吧简介: {i.get('slogan','无')} </div>
+            </div>
+            <hr>"""
+    try:
+        msg = MIMEText(body, 'html', 'utf-8')
+        msg['subject'] = subject
+        smtp = smtplib.SMTP()
+        smtp.connect(HOST)
+        smtp.login(FROM, AUTH)
+        smtp.sendmail(FROM, TO, msg.as_string())
+        smtp.quit()
+        logger.info("邮件发送成功")
+    except smtplib.SMTPException as e:
+        logger.error("邮件发送失败：%s", e)
+    except Exception as e:
+        logger.error("邮件发送时发生错误：%s", e)
+
+# -----------------------------
+# 工具函数: 时间格式化
 # -----------------------------
 def format_time(seconds):
     minutes = seconds // 60
-    sec = seconds % 60
-    return f"{minutes}分{sec}秒" if minutes else f"{sec}秒"
+    remaining = seconds % 60
+    if minutes > 0:
+        return f"{minutes}分{remaining}秒"
+    else:
+        return f"{remaining}秒"
 
-def send_email(sign_list, total_sign_time, task_status):
-    moderated_bars = [b.strip() for b in MODERATED_BARS.split(',') if b.strip()]
-    HOST = ENV.get('HOST')
-    FROM = ENV.get('FROM')
-    TO   = ENV.get('TO','').split('#')
-    AUTH = ENV.get('AUTH')
-    if not all([HOST, FROM, TO, AUTH]):
-        logger.error("邮件参数未配置完整，跳过发送")
-        return
-    subject = f"{time.strftime('%Y-%m-%d')} 签到{len(sign_list)}个账号报告"
-    body = f"<h2>签到报告 - {time.strftime('%Y年%m月%d日')}</h2>"
-    body += f"<p>共 {len(sign_list)} 个账号签到，耗时 {format_time(total_sign_time)}</p>"
-    if moderated_bars:
-        body += "<h3>吧主考核任务：</h3>"
-        for bar, st in zip(moderated_bars, task_status):
-            icon='✅' if st['reply'] or st['top'] else '❌'
-            body += f"<p>{bar}：{icon} (发帖:{'✓' if st['reply'] else '✗'},置顶:{'✓' if st['top'] else '✗'})</p>"
-    for idx, favs in enumerate(sign_list,1):
-        body += f"<h4>账号{idx}关注贴吧：</h4>"
-        for f in favs:
-            body += f"<p>吧名:{f.get('name')}，简介:{f.get('slogan','无')}</p>"
-    msg = MIMEText(body,'html','utf-8')
-    msg['Subject']=subject
-    try:
-        smtp = smtplib.SMTP(HOST)
-        smtp.login(FROM,AUTH)
-        smtp.sendmail(FROM,TO,msg.as_string())
-        smtp.quit()
-        logger.info("邮件发送成功")
-    except Exception as e:
-        logger.error(f"邮件发送失败: {e}")
-
+# -----------------------------
+# 根据吧名获取 fid
+# -----------------------------
 def get_fid_by_name(bduss, kw):
     """
     根据吧名获取 fid：
       1. 去掉末尾的“吧”字
       2. 调用分享接口并解析 JSON 返回的 data.fid
     """
-    # 1. 去掉“吧”后缀，防止接口对带“吧”的名称返回空
     name = kw.rstrip("吧")
-
-    # 2. 构造分享接口并对名称进行 percent-encoding
     url = (
         "http://tieba.baidu.com/f/commit/share/fnameShareApi"
         f"?ie=utf-8&fname={quote(name)}"
     )
-
-    # 使用随机 UA
     headers = get_headers()
     headers.update({COOKIE: f"{BDUSS}={bduss}"})
     try:
@@ -325,41 +371,78 @@ def get_fid_by_name(bduss, kw):
             raise ValueError(f"接口返回 data 中缺少 fid：{data}")
         return str(fid)
     except Exception as e:
-        logger.error(f"获取吧名 {kw!r} 的 fid 失败：{e}")
+        logger.error(f"获取吧名 {kw!r} 的 fid 失败：%s", e)
         raise
 
+# -----------------------------
+# 主入口
+# -----------------------------
 def main():
+    """
+    主函数：签到所有账号，条件触发吧主任务后进行回复/置顶
+    """
     if 'BDUSS' not in ENV:
         logger.error("未配置 BDUSS，停止执行")
         return
-    bds=ENV['BDUSS'].split('#')
-    all_fav=[]
-    tot_time=0
-    task_status=[]
-    for idx,bduss in enumerate(bds,1):
-        logger.info(f"开始账号{idx}签到")
-        st=time.time()
-        try: tbs=get_tbs(bduss)
-        except: continue
-        favs=get_favorite(bduss)
-        all_fav.append(favs)
-        for f in favs:
-            time.sleep(random.uniform(1,3))
-            client_sign(bduss,tbs,f['id'],f['name'])
-        tot_time+=int(time.time()-st)
-        if str(idx-1)==MODERATOR_BDUSS_INDEX and MODERATED_BARS and TARGET_POST_IDS:
-            bars=[b.strip() for b in MODERATED_BARS.split(',') if b.strip()]
-            posts=[p.strip() for p in TARGET_POST_IDS.split(',') if p.strip()]
-            seen=set()
-            for bar,pid in zip(bars,posts):
+
+    # 新增：吧主任务执行间隔
+    interval_days = int(ENV.get('MODERATOR_INTERVAL_DAYS', '3'))
+    from pathlib import Path
+    import json
+    last_file = Path('last_moderator_run.json')
+    today_str = time.strftime('%Y-%m-%d')
+    can_run_moderator = True
+    if last_file.exists():
+        try:
+            data = json.loads(last_file.read_text())
+            last_str = data.get('last_run', '')
+            last_time = time.strptime(last_str, '%Y-%m-%d')
+            last_ts = time.mktime(last_time)
+            diff_days = (time.time() - last_ts) / 86400
+            if diff_days < interval_days:
+                can_run_moderator = False
+                logger.info(f"吧主任务距离上次运行仅 {diff_days:.1f} 天，需间隔 {interval_days} 天，跳过吧主任务")
+        except Exception as e:
+            logger.warning(f"读取上次运行时间失败: {e}")
+
+    bds_list = ENV['BDUSS'].split('#')
+    all_favorites = []
+    total_sign_time = 0
+    task_status = []
+    for idx, bduss in enumerate(bds_list, start=1):
+        logger.info(f"开始第{idx}个用户签到")
+        start_time = time.time()
+        try:
+            tbs = get_tbs(bduss)
+        except Exception:
+            continue
+        favorites = get_favorite(bduss)
+        logger.info("账号%d关注贴吧数量: %d", idx, len(favorites))
+        all_favorites.append(favorites)
+        for f in favorites:
+            time.sleep(random.uniform(1, 3))
+            client_sign(bduss, tbs, f['id'], f['name'])
+        total_sign_time += int(time.time() - start_time)
+        if can_run_moderator and str(idx-1) == MODERATOR_BDUSS_INDEX and MODERATED_BARS and TARGET_POST_IDS:
+            bars = [b.strip() for b in MODERATED_BARS.split(',') if b.strip()]
+            posts = [p.strip() for p in TARGET_POST_IDS.split(',') if p.strip()]
+            seen = set()
+            for bar, pid in zip(bars, posts):
                 if bar in seen: continue
                 seen.add(bar)
                 logger.info(f"执行吧主任务:{bar}")
-                st=moderator_task(bduss,tbs,bar,pid)
-                task_status.append(st)
+                status = moderator_task(bduss, tbs, bar, pid)
+                task_status.append(status)
                 time.sleep(5)
-    send_email(all_fav,tot_time,task_status)
-    logger.info("脚本执行完毕")
+    if can_run_moderator and task_status:
+        try:
+            import json
+            Path('last_moderator_run.json').write_text(json.dumps({'last_run': today_str}))
+            logger.info(f"更新吧主任务上次运行时间: {today_str}")
+        except Exception as e:
+            logger.warning(f"更新 last_run 失败: {e}")
+    send_email(all_favorites, total_sign_time, task_status)
+    logger.info("所有用户签到结束")
 
-if __name__=='__main__':
+if __name__ == '__main__':
     main()
