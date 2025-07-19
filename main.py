@@ -56,9 +56,9 @@ SIGN_URL    = "http://c.tieba.baidu.com/c/c/forum/sign"          # 签到接口
 # 环境变量 & 开关
 # -----------------------------
 ENV                     = os.environ
-DO_MODERATOR_TASK       = ENV.get('MODERATOR_TASK_ENABLE', 'false').lower() == 'false'
+DO_MODERATOR_TASK       = ENV.get('MODERATOR_TASK_ENABLE', 'false').lower() == 'true'
 DO_MODERATOR_POST       = ENV.get('MODERATOR_POST_ENABLE',  'false').lower() == 'true'
-DO_MODERATOR_TOP        = ENV.get('MODERATOR_TOP_ENABLE',   'false').lower() == 'true'
+DO_MODERATOR_TOP        = ENV.get('MODERATOR_TOP_ENABLE',   'false').lower() == 'false'
 MODERATOR_BDUSS_INDEX   = ENV.get('MODERATOR_BDUSS_INDEX', '0')
 MODERATED_BARS          = ENV.get('MODERATED_BARS', '')
 TARGET_POST_IDS         = ENV.get('TARGET_POST_IDS', '')
