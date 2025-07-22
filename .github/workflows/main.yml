@@ -29,6 +29,10 @@ jobs:
           MODERATED_BARS: ${{ secrets.MODERATED_BARS }}
           MODERATOR_BDUSS_INDEX: ${{ secrets.MODERATOR_BDUSS_INDEX }}
           TARGET_POST_IDS: ${{ secrets.TARGET_POST_IDS }}
+          MODERATOR_TASK_ENABLE:    "true"   # 吧主任务
+          MODERATOR_POST_ENABLE:    "true"   # 回复任务
+          MODERATOR_TOP_ENABLE:     "false"  # 置顶任务
+          MODERATOR_DELETE_ENABLE:  "false"  # 删除回复
         run: python main.py
       - name: Append Success Log  # 追加成功日志
         run: |
