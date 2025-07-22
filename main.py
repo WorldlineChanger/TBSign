@@ -1,5 +1,4 @@
 # -*- coding:utf-8 -*-
-
 import os
 import requests
 import hashlib
@@ -45,9 +44,9 @@ def get_headers(is_mobile=False):
 # -----------------------------
 # API 地址
 # -----------------------------
-REPLY_URL   = "https://tieba.baidu.com/f/commit/post/add"        # 回帖接口
-DELETE_URL  = "https://c.tieba.baidu.com/c/u/comment/postDel"    # 删除回复接口
-SET_TOP_URL = "https://tieba.baidu.com/mo/q"                     # 置顶/取消置顶接口
+REPLY_URL   = "http://c.tieba.baidu.com/c/c/post/add"            # 回帖接口（移动端）
+DELETE_URL  = "http://c.tieba.baidu.com/c/u/comment/postDel"     # 删除回复接口
+SET_TOP_URL = "http://tieba.baidu.com/mo/q"                      # 置顶/取消置顶接口
 TBS_URL     = "http://tieba.baidu.com/dc/common/tbs"             # 获取 tbs
 LIKIE_URL   = "http://c.tieba.baidu.com/c/f/forum/like"          # 获取关注贴吧接口
 SIGN_URL    = "http://c.tieba.baidu.com/c/c/forum/sign"          # 签到接口
@@ -59,6 +58,7 @@ ENV                     = os.environ
 DO_MODERATOR_TASK       = ENV.get('MODERATOR_TASK_ENABLE', 'false').lower() == 'true'
 DO_MODERATOR_POST       = ENV.get('MODERATOR_POST_ENABLE',  'false').lower() == 'true'
 DO_MODERATOR_TOP        = ENV.get('MODERATOR_TOP_ENABLE',   'false').lower() == 'false'
+DO_MODERATOR_DELETE     = ENV.get('MODERATOR_DELETE_ENABLE','true').lower() == 'false'  # 是否删除回复
 MODERATOR_BDUSS_INDEX   = ENV.get('MODERATOR_BDUSS_INDEX', '0')
 MODERATED_BARS          = ENV.get('MODERATED_BARS', '')
 TARGET_POST_IDS         = ENV.get('TARGET_POST_IDS', '')
@@ -237,6 +237,8 @@ def moderator_task(bduss, tbs, bar_name, post_id):
     success = {'reply': False, 'top': False}
     if not DO_MODERATOR_TASK:
         return success
+    # 开始吧主任务日志
+    logger.info(f"开始吧主任务: {bar_name}, post_id={post_id}")
     try:
         fid = get_fid_by_name(bduss, bar_name)
     except Exception as e:
@@ -244,42 +246,93 @@ def moderator_task(bduss, tbs, bar_name, post_id):
         return success
     cookies = {BDUSS: bduss}
     def rnd_sleep(): time.sleep(random.uniform(3, 8))
+    # 1. 回复 & 删除
     if DO_MODERATOR_POST:
-        current_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-        content = f"{current_time} #(滑稽)"
-        reply_data = {'BDUSS': bduss, 'content': content, 'fid': fid, 'tid': post_id, 'vcode_tag': '11', 'tbs': tbs}
+        # 构造带前缀时间戳
+        current_time = time.strftime("%Y年%m月%d日 %H时%M分%S秒", time.localtime())
+        content = f"世界线 - {current_time}  #(滑稽)"
+        logger.info(f"回复内容: {content}")
+        reply_data = {
+            'BDUSS': bduss,
+            'content': content,
+            'fid': fid,
+            'tid': post_id,
+            'vcode_tag': '11',
+            'tbs': tbs
+        }
         reply_data['mouse_pwd_t'] = str(int(time.time() * 1000))
         reply_data['mouse_pwd']   = reply_data['mouse_pwd_t']
         rnd_sleep()
-        resp = s.post(REPLY_URL, headers=get_headers(is_mobile=True), cookies=cookies, data=encodeData(reply_data), timeout=10)
+        resp = s.post(
+            REPLY_URL,
+            headers=get_headers(is_mobile=True),
+            cookies=cookies,
+            data=encodeData(reply_data),
+            timeout=10
+        )
         try:
             jr = resp.json()
-            if check_wind_control(jr): return success
+            logger.info(f"回复接口返回: {jr}")
+            if check_wind_control(jr):
+                return success
             if jr.get('error_code') == 0:
                 success['reply'] = True
                 pid = jr.get('data', {}).get('post_id') or jr.get('pid')
                 logger.info(f"回复成功 pid={pid}")
-                if pid:
+                # 删除回复
+                if DO_MODERATOR_DELETE and pid:
                     rnd_sleep()
                     del_data = {'post_id': pid, 'del_type': '0', 'tbs': tbs}
-                    del_resp = s.post(DELETE_URL, headers=get_headers(is_mobile=True), cookies=cookies, data=encodeData(del_data), timeout=10)
-                    logger.info(f"删除回复 status={del_resp.status_code}")
+                    del_resp = s.post(
+                        DELETE_URL,
+                        headers=get_headers(is_mobile=True),
+                        cookies=cookies,
+                        data=encodeData(del_data),
+                        timeout=10
+                    )
+                    try:
+                        jr_del = del_resp.json()
+                        logger.info(f"删除回复 status={del_resp.status_code}, response: {jr_del}")
+                    except JSONDecodeError:
+                        logger.info(f"删除回复 status={del_resp.status_code}, 无 JSON 返回")
+                else:
+                    logger.info("删除操作已关闭或 pid 缺失")
+            else:
+                logger.error(f"回复失败: {jr}")
         except Exception as e:
             logger.error(f"回复/删除阶段失败: {e}")
+    else:
+        logger.info("发帖操作已关闭")
+    # 2. 置顶 & 取消置顶
     if DO_MODERATOR_TOP:
         rnd_sleep()
-        s.get(SET_TOP_URL, headers=get_headers(is_mobile=True), cookies=cookies, params={'tn':'bdTOP','z':post_id,'tbs':tbs,'word':bar_name})
+        resp_top = s.get(
+            SET_TOP_URL,
+            headers=get_headers(is_mobile=True),
+            cookies=cookies,
+            params={'tn':'bdTOP','z':post_id,'tbs':tbs,'word':bar_name}
+        )
+        logger.info(f"置顶返回 status={resp_top.status_code}")
         success['top'] = True
-        logger.info(f"置顶尝试完成: {post_id}")
         rnd_sleep()
-        s.get(SET_TOP_URL, headers=get_headers(is_mobile=True), cookies=cookies, params={'tn':'bdUNTOP','z':post_id,'tbs':tbs,'word':bar_name})
-        logger.info(f"取消置顶尝试完成: {post_id}")
+        resp_untop = s.get(
+            SET_TOP_URL,
+            headers=get_headers(is_mobile=True),
+            cookies=cookies,
+            params={'tn':'bdUNTOP','z':post_id,'tbs':tbs,'word':bar_name}
+        )
+        logger.info(f"取消置顶返回 status={resp_untop.status_code}")
+    else:
+        logger.info("置顶操作已关闭")
     return success
 
 # -----------------------------
-# 5. 邮件汇报函数（恢复原始样式）
+# 5. 邮件汇报函数
 # -----------------------------
 def send_email(sign_list, total_sign_time, task_status):
+    """
+    发送日报邮件，包含签到报告和吧主任务状态
+    """
     moderated_bars = ENV.get('MODERATED_BARS', '').split(',') if 'MODERATED_BARS' in ENV else []
     if ('HOST' not in ENV or 'FROM' not in ENV or 'TO' not in ENV or 'AUTH' not in ENV):
         logger.error("未配置邮箱")
@@ -290,17 +343,34 @@ def send_email(sign_list, total_sign_time, task_status):
     AUTH = ENV['AUTH']
     length = len(sign_list)
     subject = f"{time.strftime('%Y-%m-%d')} 签到{length}个贴吧账号"
+
     body = f"<h2 style='color: #66ccff;'>签到报告 - {time.strftime('%Y年%m月%d日')}</h2>"
     body += f"<h3>共有{length}个账号签到，总签到时间：{format_time(total_sign_time)}</h3>"
     if moderated_bars:
         body += "<h3>吧主考核任务执行情况：</h3>"
         for bar_name, status in zip(moderated_bars, task_status):
-            icon = "✅" if status['reply'] or status['top'] else "❌"
-            body += f"""<div class="child">
-                {bar_name}：{icon}<br>
-                发帖操作：{"成功" if status['reply'] else "失败"}<br>
-                置顶操作：{"成功" if status['top'] else "失败"}
-            </div>"""
+            # 发帖状态判断
+            if not DO_MODERATOR_TASK or not DO_MODERATOR_POST:
+                post_text = '取消'
+            elif status['reply']:
+                post_text = '成功'
+            else:
+                post_text = '失败'
+            # 置顶状态判断
+            if not DO_MODERATOR_TASK or not DO_MODERATOR_TOP:
+                top_text = '取消'
+            elif status['top']:
+                top_text = '成功'
+            else:
+                top_text = '失败'
+            icon = '✅' if status['reply'] or status['top'] else '❌'
+            body += (
+                f"<div class=\"child\">"
+                f"{bar_name}：{icon}<br>"
+                f"发帖操作：{post_text}<br>"
+                f"置顶操作：{top_text}"
+                f"</div>"
+            )
     body += """
     <style>
     .child {
@@ -313,14 +383,15 @@ def send_email(sign_list, total_sign_time, task_status):
     }
     </style>
     """
-    for idx, user_favorites in enumerate(sign_list):
-        body += f"<br><b>账号{idx+1}的签到信息：</b><br><br>"
+    for idx, user_favorites in enumerate(sign_list, start=1):
+        body += f"<br><b>账号{idx}的签到信息：</b><br><br>"
         for i in user_favorites:
-            body += f"""<div class="child">
-                <div class="name"> 贴吧名称: {i['name']} </div>
-                <div class="slogan"> 贴吧简介: {i.get('slogan','无')} </div>
-            </div>
-            <hr>"""
+            body += (
+                f"<div class=\"child\">"
+                f"<div class=\"name\">贴吧名称: {i['name']}</div>"
+                f"<div class=\"slogan\">贴吧简介: {i.get('slogan','无')}</div>"
+                f"</div><hr>"
+            )
     try:
         msg = MIMEText(body, 'html', 'utf-8')
         msg['subject'] = subject
