@@ -18,28 +18,134 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # -----------------------------
-# User-Agent 随机轮换设置
+# 设备指纹生成
 # -----------------------------
+import uuid
+
+def gen_advanced_device():
+    """生成设备指纹，包含真实设备特征"""
+    # 真实IMEI算法（Luhn校验）
+    def generate_valid_imei():
+        imei_base = ''.join(random.choices('0123456789', k=14))
+        # Luhn算法计算校验位
+        def luhn_checksum(card_num):
+            def digits_of(n):
+                return [int(d) for d in str(n)]
+            digits = digits_of(card_num)
+            odd_digits = digits[-1::-2]
+            even_digits = digits[-2::-2]
+            checksum = sum(odd_digits)
+            for d in even_digits:
+                checksum += sum(digits_of(d*2))
+            return checksum % 10
+        check_digit = (10 - luhn_checksum(int(imei_base))) % 10
+        return imei_base + str(check_digit)
+    
+    # 真实设备型号和对应的技术参数
+    device_profiles = [
+        {
+            'model': 'MI 13', 'brand': 'Xiaomi', 'android': '13', 'sdk': '33',
+            'cpu': 'Qualcomm SM8550-AB Snapdragon 8 Gen 2', 'resolution': '2400x1080'
+        },
+        {
+            'model': 'Pixel 8', 'brand': 'Google', 'android': '14', 'sdk': '34',
+            'cpu': 'Google Tensor G3', 'resolution': '2400x1080'
+        },
+        {
+            'model': 'HUAWEI P50', 'brand': 'HUAWEI', 'android': '11', 'sdk': '30',
+            'cpu': 'Kirin 9000', 'resolution': '2700x1224'
+        },
+        {
+            'model': 'OnePlus 11', 'brand': 'OnePlus', 'android': '13', 'sdk': '33',
+            'cpu': 'Qualcomm SM8550-AB Snapdragon 8 Gen 2', 'resolution': '3216x1440'
+        },
+        {
+            'model': 'vivo X90', 'brand': 'vivo', 'android': '13', 'sdk': '33',
+            'cpu': 'MediaTek Dimensity 9200', 'resolution': '2800x1260'
+        }
+    ]
+    
+    device = random.choice(device_profiles)
+    rand_imei = generate_valid_imei()
+    
+    # 更复杂的客户端ID生成
+    timestamp = int(time.time() * 1000)
+    rand_suffix = uuid.uuid4().hex[:8]
+    client_id = f"wappc_{timestamp}_{rand_suffix}"
+    
+    # 生成设备唯一标识CUID
+    cuid = hashlib.md5(f"{rand_imei}_{device['model']}_{timestamp}".encode()).hexdigest()[:16]
+    
+    return {
+        'imei': rand_imei,
+        'model': device['model'],
+        'brand': device['brand'],
+        'android_version': device['android'],
+        'sdk_version': device['sdk'],
+        'cpu': device['cpu'],
+        'resolution': device['resolution'],
+        'client_id': client_id,
+        'cuid': cuid
+    }
+
+# 全局设备指纹 - 启动时生成一次
+DEVICE = gen_advanced_device()
+logger.info(f"生成设备指纹: {DEVICE['brand']} {DEVICE['model']}, IMEI={DEVICE['imei'][:4]}****, CUID={DEVICE['cuid']}")
+
+# 高级UA生成器
+def generate_realistic_ua(device_info):
+    """基于设备信息生成UA"""
+    android_version = device_info['android_version']
+    model = device_info['model'].replace(' ', '%20')
+    brand = device_info['brand']
+    
+    # Chrome版本池（移动端Chrome版本）
+    chrome_versions = ['118.0.0.0', '119.0.0.0', '120.0.0.0', '121.0.0.0']
+    chrome_ver = random.choice(chrome_versions)
+    
+    # WebKit版本与Chrome版本对应
+    webkit_ver = '537.36'
+    
+    return f"Mozilla/5.0 (Linux; Android {android_version}; {model}) AppleWebKit/{webkit_ver} (KHTML, like Gecko) Chrome/{chrome_ver} Mobile Safari/{webkit_ver}"
+
 USER_AGENTS_DESKTOP = [
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
-    '(KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 '
-    '(KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 '
-    '(KHTML, like Gecko) Chrome/112.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; rv:122.0) Gecko/20100101 Firefox/122.0',
 ]
-MOBILE_UA = (
-    'Mozilla/5.0 (Linux; Android 12; Pixel 5) AppleWebKit/537.36 '
-    '(KHTML, like Gecko) Chrome/114.0.0.0 Mobile Safari/537.36'
-)
+
+# 动态UA管理
+UA_REFRESH_CYCLE = 10
+_current_mobile_ua = generate_realistic_ua(DEVICE)
+_ua_counter = 0
 
 def get_headers(is_mobile=False):
-    """获取基础请求头，随机 UA"""
-    ua = MOBILE_UA if is_mobile else random.choice(USER_AGENTS_DESKTOP)
-    return {
-        'Host': 'tieba.baidu.com',
-        'User-Agent': ua,
-    }
+    """获取基础请求头，支持动态UA刷新"""
+    global _ua_counter, _current_mobile_ua
+    if is_mobile:
+        _ua_counter += 1
+        if _ua_counter % UA_REFRESH_CYCLE == 0:
+            _current_mobile_ua = generate_realistic_ua(DEVICE)
+        ua = _current_mobile_ua
+        
+        # 移动端特有的请求头
+        headers = {
+            'Host': 'c.tieba.baidu.com',
+            'User-Agent': ua,
+            'Accept': 'application/json, text/plain, */*',
+            'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+            'Accept-Encoding': 'gzip, deflate',
+            'Connection': 'keep-alive',
+        }
+    else:
+        ua = random.choice(USER_AGENTS_DESKTOP)
+        headers = {
+            'Host': 'tieba.baidu.com',
+            'User-Agent': ua,
+        }
+    
+    return headers
 
 # -----------------------------
 # API 地址
@@ -58,7 +164,7 @@ ENV                     = os.environ
 DO_MODERATOR_TASK   = ENV.get('MODERATOR_TASK_ENABLE'  ,'false').lower() == 'true'
 DO_MODERATOR_POST   = ENV.get('MODERATOR_POST_ENABLE'  ,'false').lower() == 'true'
 DO_MODERATOR_TOP    = ENV.get('MODERATOR_TOP_ENABLE'   ,'false').lower() == 'true'
-DO_MODERATOR_DELETE = ENV.get('MODERATOR_DELETE_ENABLE','true').lower() == 'true'  # 是否删除回复
+DO_MODERATOR_DELETE = ENV.get('MODERATOR_DELETE_ENABLE','false').lower() == 'true'  # 是否删除回复
 MODERATOR_BDUSS_INDEX   = ENV.get('MODERATOR_BDUSS_INDEX', '0')
 MODERATED_BARS          = ENV.get('MODERATED_BARS', '')
 TARGET_POST_IDS         = ENV.get('TARGET_POST_IDS', '')
@@ -70,12 +176,16 @@ COOKIE       = "Cookie"
 BDUSS        = "BDUSS"
 SIGN_KEY     = 'tiebaclient!!!'
 UTF8         = "utf-8"
+
+# 基础签名数据（使用高级设备指纹）
 SIGN_DATA    = {
     '_client_type': '2',
-    '_client_version': '9.7.8.0',
-    '_phone_imei': '000000000000000',
-    'model': 'MI+5',
+    '_client_version': '12.18.1.0',
+    '_phone_imei': DEVICE['imei'],
+    'model': DEVICE['model'],
     'net_type': '1',
+    '_client_id': DEVICE['client_id'],
+    'cuid': DEVICE['cuid'],
 }
 
 # 全局 Session
@@ -89,12 +199,79 @@ def check_wind_control(resp_json):
     检测是否触发风控，根据常见 error_code 暂停。
     返回 True 表示触发风控并已退避。
     """
-    ec = resp_json.get('error_code')
-    if ec in (110, 221023, 219016):
+    ec = str(resp_json.get('error_code', ''))
+    # 常见需要验证码/被限制的错误码，可根据抓包继续补充
+    if ec in ('110', '221023', '219016', '4', '220034'):
         logger.warning(f"触发风控({ec})，暂停5分钟")
         time.sleep(300)
         return True
     return False
+
+# -----------------------------
+# 构造随机回复内容（保持原版格式）
+# -----------------------------
+import uuid
+from datetime import datetime, timezone, timedelta
+
+CN_TZ = timezone(timedelta(hours=8))  # 北京时间
+NOISE_CHARS = ['​', '‌', '⁠', '᠎']  # 零宽/特殊空白字符
+SCI_FI_PHRASES = [
+    'IBN-5100 校准中',
+    '世界线变动率 0.337%',
+    'D-Mail 已发送',
+    'Operation Skuld √',
+    'MAGI 决断 √',
+    'EVA 启动待命',
+    'AT 力场稳定',
+    'Phase Shift Online',
+    'Laplace Demon 解析',
+    'EXAM 系统运行',
+    'LCL 循环正常',
+    'Dirac Sea 连接',
+    'Geass 已授予',
+    '同步率 400%↑',
+    'Twin Drive 共振',
+    'Quantization Complete',
+    'GUTS 收到',
+]
+
+def get_hitokoto():
+    """调用一言 API 获取随机句子"""
+    try:
+        resp = requests.get('https://v1.hitokoto.cn/?encode=json', timeout=5)
+        if resp.status_code == 200:
+            data = resp.json()
+            qt  = data.get('hitokoto', '').strip()
+            frm = data.get('from', '').strip()       # 作品名
+            who = data.get('from_who', '').strip()   # 角色名
+            if qt:
+                if frm and who:
+                    return f"{qt}\n——{frm} · {who}"
+                elif frm:
+                    return f"{qt}\n——{frm}"
+                else:
+                    return qt
+    except Exception:
+        pass
+    return ''
+
+def build_reply_content():
+    """生成随机化回复内容，含北京时间、零宽符、短句、一言"""
+    now_str = datetime.now(CN_TZ).strftime('%Y年%m月%d日 %H时%M分%S秒')
+    first_line = f"世界线 - {now_str} #(滑稽)"
+
+    noise = ''.join(random.choice(NOISE_CHARS) for _ in range(random.randint(1,3)))
+    sci_phrase = random.choice(SCI_FI_PHRASES)
+    rand_token = uuid.uuid4().hex[:6]
+    second_line = f"{noise}{sci_phrase}-{rand_token}"
+
+    quote = get_hitokoto()
+    if quote:
+        quote_block = f"\n\n{quote}"
+    else:
+        quote_block = ''
+
+    return f"{first_line}\n{second_line}{quote_block}"
 
 # -----------------------------
 # 请求参数签名
@@ -141,13 +318,14 @@ def get_favorite(bduss):
     data = {
         'BDUSS': bduss,
         '_client_type': '2',
-        '_client_id': 'wappc_1534235498291_488',
-        '_client_version': '9.7.8.0',
-        '_phone_imei': '000000000000000',
+        '_client_id': DEVICE['client_id'],
+        '_client_version': SIGN_DATA['_client_version'],
+        '_phone_imei': DEVICE['imei'],
+        'cuid': DEVICE['cuid'],
         'from': '1008621y',
         'page_no': '1',
         'page_size': '200',
-        'model': 'MI+5',
+        'model': DEVICE['model'],
         'net_type': '1',
         'timestamp': str(int(time.time())),
         'vcode_tag': '11',
@@ -173,13 +351,14 @@ def get_favorite(bduss):
         data = {
             'BDUSS': bduss,
             '_client_type': '2',
-            '_client_id': 'wappc_1534235498291_488',
-            '_client_version': '9.7.8.0',
-            '_phone_imei': '000000000000000',
+            '_client_id': DEVICE['client_id'],
+            '_client_version': SIGN_DATA['_client_version'],
+            '_phone_imei': DEVICE['imei'],
+            'cuid': DEVICE['cuid'],
             'from': '1008621y',
             'page_no': str(i),
             'page_size': '200',
-            'model': 'MI+5',
+            'model': DEVICE['model'],
             'net_type': '1',
             'timestamp': str(int(time.time())),
             'vcode_tag': '11',
@@ -230,10 +409,10 @@ def client_sign(bduss, tbs, fid, kw):
         return {'error_code': 0}
 
 # -----------------------------
-# 4. 吧主任务：回复+删除 & 置顶/取消置顶
+# 4. 吧主任务：回复+删除 & 置顶/取消置顶（优化版）
 # -----------------------------
 def moderator_task(bduss, tbs, bar_name, post_id):
-    """执行吧主考核任务，返回 {'reply': bool, 'top': bool}"""
+    """执行吧主考核任务，采用防检测措施"""
     success = {'reply': False, 'top': False}
     if not DO_MODERATOR_TASK:
         return success
@@ -246,43 +425,69 @@ def moderator_task(bduss, tbs, bar_name, post_id):
         return success
     cookies = {BDUSS: bduss}
     def rnd_sleep(): time.sleep(random.uniform(3, 8))
-    # 1. 回复 & 删除
+    
+    # 1. 回复 & 删除（增强防检测）
     if DO_MODERATOR_POST:
-        # 构造带前缀时间戳
-        current_time = time.strftime("%Y年%m月%d日 %H时%M分%S秒", time.localtime())
-        content = f"世界线 - {current_time}  #(滑稽)"
+        content = build_reply_content()
         logger.info(f"回复内容: {content}")
+        
+        # 构造完整的防检测参数
+        current_timestamp = int(time.time())
+        current_timestamp_ms = int(time.time() * 1000)
+        
         reply_data = {
             'BDUSS': bduss,
             'content': content,
             'fid': fid,
             'tid': post_id,
+            'kw': bar_name,
+            'tbs': tbs,
+            '_client_type': '2',
+            '_client_version': SIGN_DATA['_client_version'],
+            '_phone_imei': DEVICE['imei'],
+            'model': DEVICE['model'],
+            '_client_id': DEVICE['client_id'],
+            'cuid': DEVICE['cuid'],
+            'net_type': '1',
+            'timestamp': str(current_timestamp),
             'vcode_tag': '11',
-            'tbs': tbs
+            'is_adlay': '1',
+            'mouse_pwd_t': str(current_timestamp_ms),
+            'mouse_pwd': str(current_timestamp_ms),
         }
-        reply_data['mouse_pwd_t'] = str(int(time.time() * 1000))
-        reply_data['mouse_pwd']   = reply_data['mouse_pwd_t']
+        
         rnd_sleep()
         resp = s.post(
             REPLY_URL,
             headers=get_headers(is_mobile=True),
             cookies=cookies,
             data=encodeData(reply_data),
-            timeout=10
+            timeout=15
         )
         try:
             jr = resp.json()
             logger.info(f"回复接口返回: {jr}")
             if check_wind_control(jr):
                 return success
-            if jr.get('error_code') == 0:
+            if str(jr.get('error_code', '')) == '0' or jr.get('msg') == '发送成功':
                 success['reply'] = True
                 pid = jr.get('data', {}).get('post_id') or jr.get('pid')
                 logger.info(f"回复成功 pid={pid}")
                 # 删除回复
                 if DO_MODERATOR_DELETE and pid:
                     rnd_sleep()
-                    del_data = {'post_id': pid, 'del_type': '0', 'tbs': tbs}
+                    del_data = {
+                        'BDUSS': bduss,
+                        'post_id': pid, 
+                        'del_type': '0', 
+                        'tbs': tbs,
+                        '_client_type': '2',
+                        '_client_version': SIGN_DATA['_client_version'],
+                        '_phone_imei': DEVICE['imei'],
+                        'model': DEVICE['model'],
+                        'cuid': DEVICE['cuid'],
+                        'timestamp': str(int(time.time())),
+                    }
                     del_resp = s.post(
                         DELETE_URL,
                         headers=get_headers(is_mobile=True),
@@ -303,6 +508,7 @@ def moderator_task(bduss, tbs, bar_name, post_id):
             logger.error(f"回复/删除阶段失败: {e}")
     else:
         logger.info("发帖操作已关闭")
+    
     # 2. 置顶 & 取消置顶
     if DO_MODERATOR_TOP:
         rnd_sleep()
@@ -346,6 +552,17 @@ def send_email(sign_list, total_sign_time, task_status):
 
     body = f"<h2 style='color: #66ccff;'>签到报告 - {time.strftime('%Y年%m月%d日')}</h2>"
     body += f"<h3>共有{length}个账号签到，总签到时间：{format_time(total_sign_time)}</h3>"
+    body += f"""
+    <div style='background-color: #f0f8ff; padding: 10px; margin: 10px 0; border-left: 4px solid #4a90e2;'>
+        <h4>设备信息</h4>
+        <ul>
+            <li>设备型号: {DEVICE['brand']} {DEVICE['model']}</li>
+            <li>IMEI: {DEVICE['imei'][:4]}****{DEVICE['imei'][-4:]}</li>
+            <li>CUID: {DEVICE['cuid'][:8]}...</li>
+            <li>客户端版本: {SIGN_DATA['_client_version']}</li>
+        </ul>
+    </div>
+    """
     if moderated_bars:
         body += "<h3>吧主考核任务执行情况：</h3>"
         for bar_name, status in zip(moderated_bars, task_status):
