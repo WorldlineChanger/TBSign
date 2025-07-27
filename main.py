@@ -440,7 +440,7 @@ def moderator_task(bduss, tbs, bar_name, post_id):
             'content': content,
             'fid': fid,
             'tid': post_id,
-            'kw': bar_name,
+            # 'kw': bar_name,
             'tbs': tbs,
             '_client_type': '2',
             '_client_version': SIGN_DATA['_client_version'],
