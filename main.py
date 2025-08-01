@@ -238,7 +238,7 @@ SCI_FI_PHRASES = [
 def get_hitokoto():
     """调用一言 API 获取随机句子"""
     try:
-        resp = requests.get('https://v1.hitokoto.cn/?encode=json', timeout=5)
+        resp = requests.get('https://v1.hitokoto.cn/?encode=json', timeout=10)
         if resp.status_code == 200:
             data = resp.json()
             qt  = data.get('hitokoto', '').strip()
@@ -267,7 +267,9 @@ def build_reply_content():
 
     quote = get_hitokoto()
     if quote:
-        quote_block = f"\n\n{quote}"
+        WHITESPACE = '\u200b\u3000'
+        quote_block = f"\n{WHITESPACE}\n{quote}"
+        # quote_block = f"\n\n{quote}"
     else:
         quote_block = ''
 
