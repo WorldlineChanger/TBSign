@@ -272,7 +272,7 @@ def build_reply_content():
 
     quote = get_hitokoto()
     if quote:
-        # [MOD] 使用 `/>` 为分隔，避免双换行被折叠
+        # 使用 `/>` 为分隔，避免双换行被折叠
         quote_block = f"\n/>\n{quote}"
     else:
         quote_block = ''
@@ -317,43 +317,37 @@ def get_tbs(bduss):
 # 2. 获取关注的贴吧
 # -----------------------------
 def get_favorite(bduss):
-    """获取用户关注的贴吧列表，包含分页和嵌套 flatten"""
+    """获取用户关注的贴吧列表（稳健分页 + 扁平化 + 去重 + 字段规范化）"""
     logger.info("获取关注的贴吧开始")
-    returnData = {}
-    i = 1
-    data = {
-        'BDUSS': bduss,
-        '_client_type': '2',
-        '_client_id': DEVICE['client_id'],
-        '_client_version': SIGN_DATA['_client_version'],
-        '_phone_imei': DEVICE['imei'],
-        'cuid': DEVICE['cuid'],
-        'from': '1008621y',
-        'page_no': '1',
-        'page_size': '200',
-        'model': DEVICE['model'],
-        'net_type': '1',
-        'timestamp': str(int(time.time())),
-        'vcode_tag': '11',
-    }
-    data = encodeData(data)
-    try:
-        resp = s.post(url=LIKIE_URL, data=data, timeout=10)
-        resp.raise_for_status()
-        res = resp.json()
-    except Exception as e:
-        logger.error("获取关注的贴吧出错: %s", e)
-        return []
-    returnData = res
-    if 'forum_list' not in returnData:
-        returnData['forum_list'] = []
-    if res['forum_list'] == []:
-        returnData['forum_list'] = {'gconforum': [], 'non-gconforum': []}
-    else:
-        returnData['forum_list'].setdefault('non-gconforum', [])
-        returnData['forum_list'].setdefault('gconforum', [])
-    while 'has_more' in res and res['has_more'] == '1':
-        i += 1
+    collected = []
+    seen = set()
+    page_no = 1
+
+    def _normalize(item: dict):
+        """规范化单条数据，确保包含 id / name 字段"""
+        if not isinstance(item, dict):
+            return None
+        fid = str(item.get('id') or item.get('fid') or item.get('forum_id') or '').strip()
+        name = item.get('name') or item.get('fname') or item.get('forum_name')
+        if not fid or not name:
+            return None
+        # 复制并补全标准键
+        obj = dict(item)
+        obj['id'] = fid
+        obj['name'] = str(name)
+        return obj
+
+    def _add(item):
+        obj = _normalize(item)
+        if not obj:
+            return
+        fid = obj['id']
+        if fid in seen:
+            return
+        seen.add(fid)
+        collected.append(obj)
+
+    while True:
         data = {
             'BDUSS': bduss,
             '_client_type': '2',
@@ -362,7 +356,7 @@ def get_favorite(bduss):
             '_phone_imei': DEVICE['imei'],
             'cuid': DEVICE['cuid'],
             'from': '1008621y',
-            'page_no': str(i),
+            'page_no': str(page_no),
             'page_size': '200',
             'model': DEVICE['model'],
             'net_type': '1',
@@ -376,27 +370,31 @@ def get_favorite(bduss):
             res = resp.json()
         except Exception as e:
             logger.error("获取关注的贴吧出错: %s", e)
-            continue
+            break
+
         flist = res.get('forum_list', {})
-        if 'non-gconforum' in flist:
-            returnData['forum_list']['non-gconforum'].append(flist['non-gconforum'])
-        if 'gconforum' in flist:
-            returnData['forum_list']['gconforum'].append(flist['gconforum'])
-    # flatten 嵌套列表
-    t = []
-    for section in ('non-gconforum', 'gconforum'):
-        for item in returnData['forum_list'][section]:
-            if isinstance(item, list):
-                for j in item:
-                    if isinstance(j, list):
-                        for k in j:
-                            t.append(k)
+        # 兼容不同结构：可能是 list、list[list]、或单 dict
+        for section in ('non-gconforum', 'gconforum'):
+            v = flist.get(section, [])
+            if isinstance(v, list):
+                for item in v:
+                    if isinstance(item, list):
+                        for sub in item:
+                            _add(sub)
                     else:
-                        t.append(j)
-            else:
-                t.append(item)
-    logger.info("获取关注的贴吧结束，共 %d 个", len(t))
-    return t
+                        _add(item)
+            elif isinstance(v, dict):
+                _add(v)
+
+        logger.info(f"第{page_no}页累计收集 {len(collected)} 个")
+        has_more = (str(res.get('has_more', '0')) == '1')  # 兼容整型/字符串
+        if not has_more:
+            break
+        page_no += 1
+        time.sleep(0.2)  # 轻微间隔
+
+    logger.info("获取关注的贴吧结束，共 %d 个", len(collected))
+    return collected
 
 # -----------------------------
 # 3. 客户端签到
