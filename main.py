@@ -237,22 +237,27 @@ SCI_FI_PHRASES = [
 
 def get_hitokoto():
     """调用一言 API 获取随机句子"""
-    try:
-        resp = requests.get('https://v1.hitokoto.cn/?encode=json', timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            qt  = data.get('hitokoto', '').strip()
-            frm = data.get('from', '').strip()       # 作品名
-            who = data.get('from_who', '').strip()   # 角色名
-            if qt:
-                if frm and who:
-                    return f"{qt}\n——{frm} · {who}"
-                elif frm:
-                    return f"{qt}\n——{frm}"
-                else:
-                    return qt
-    except Exception:
-        pass
+    # 增加重试机制（3次，随机1-2s间隔）
+    for attempt in range(3):
+        try:
+            resp = requests.get('https://v1.hitokoto.cn/?encode=json', timeout=10)
+            if resp.status_code == 200:
+                data = resp.json()
+                qt  = data.get('hitokoto', '').strip()
+                frm = data.get('from', '').strip()       # 作品名
+                who = data.get('from_who', '').strip()   # 角色名
+                if qt:
+                    if frm and who:
+                        return f"{qt}\n——{frm} · {who}"
+                    elif frm:
+                        return f"{qt}\n——{frm}"
+                    else:
+                        return qt
+        except Exception:
+            pass
+        # 如果没拿到，且不是最后一次，则等待后重试
+        if attempt < 2:
+            time.sleep(random.uniform(1, 2))
     return ''
 
 def build_reply_content():
@@ -267,9 +272,8 @@ def build_reply_content():
 
     quote = get_hitokoto()
     if quote:
-        WHITESPACE = '\u200b\u3000'
-        quote_block = f"\n{WHITESPACE}\n{quote}"
-        # quote_block = f"\n\n{quote}"
+        # [MOD] 使用 `/>` 为分隔，避免双换行被折叠
+        quote_block = f"\n/>\n{quote}"
     else:
         quote_block = ''
 
