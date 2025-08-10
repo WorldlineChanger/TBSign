@@ -235,27 +235,36 @@ SCI_FI_PHRASES = [
     'GUTS 收到',
 ]
 
+HITOKOTO_URLS = [
+    'https://v1.hitokoto.cn/?encode=json',
+    'https://international.v1.hitokoto.cn/?encode=json',
+]
+
 def get_hitokoto():
-    """调用一言 API 获取随机句子"""
-    # 增加重试机制（3次，随机1-2s间隔）
-    for attempt in range(3):
-        try:
-            resp = requests.get('https://v1.hitokoto.cn/?encode=json', timeout=10)
-            if resp.status_code == 200:
-                data = resp.json()
-                qt  = data.get('hitokoto', '').strip()
-                frm = data.get('from', '').strip()       # 作品名
-                who = data.get('from_who', '').strip()   # 角色名
-                if qt:
-                    if frm and who:
-                        return f"{qt}\n——{frm} · {who}"
-                    elif frm:
-                        return f"{qt}\n——{frm}"
-                    else:
-                        return qt
-        except Exception:
-            pass
-        # 如果没拿到，且不是最后一次，则等待后重试
+    """调用一言 API 获取随机句子（备用域名，多轮重试）"""
+    for attempt in range(3):  # 三轮
+        for url in HITOKOTO_URLS:  # 每轮依次尝试两个域名
+            try:
+                resp = requests.get(
+                    url,
+                    headers={'User-Agent': random.choice(USER_AGENTS_DESKTOP)},
+                    timeout=5
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    qt  = (data.get('hitokoto') or '').strip()
+                    frm = (data.get('from') or '').strip()
+                    who = (data.get('from_who') or '').strip()
+                    if qt:
+                        if frm and who:
+                            return f"{qt}\n——{frm} · {who}"
+                        elif frm:
+                            return f"{qt}\n——{frm}"
+                        else:
+                            return qt
+            except Exception:
+                pass
+        # 本轮两域名都失败，若还可重试，就退避 1~2 秒
         if attempt < 2:
             time.sleep(random.uniform(1, 2))
     return ''
@@ -373,6 +382,8 @@ def get_favorite(bduss):
             break
 
         flist = res.get('forum_list', {})
+        if not isinstance(flist, dict):
+            flist = {}
         # 兼容不同结构：可能是 list、list[list]、或单 dict
         for section in ('non-gconforum', 'gconforum'):
             v = flist.get(section, [])
@@ -725,7 +736,7 @@ def main():
                 logger.info(f"执行吧主任务:{bar}")
                 status = moderator_task(bduss, tbs, bar, pid)
                 task_status.append(status)
-                time.sleep(5)
+                time.sleep(random.uniform(6, 12))
     if can_run_moderator and task_status:
         try:
             import json
