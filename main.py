@@ -689,7 +689,7 @@ def main():
         return
 
     # 新增：吧主任务执行间隔
-    interval_days = int(ENV.get('MODERATOR_INTERVAL_DAYS', '3'))
+    interval_days = int(ENV.get('MODERATOR_INTERVAL_DAYS', '10'))
     from pathlib import Path
     import json
     last_file = Path('last_moderator_run.json')
