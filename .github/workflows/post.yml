@@ -1,0 +1,21 @@
+name: Send Content
+on: { workflow_dispatch: {} }
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post Content
+        env:
+          BDUSS: ${{ secrets.BDUSS }}        
+          UPLOAD_KEY: ${{ secrets.UPLOAD_KEY }}
+          ENDPOINT: https://media.loli.garden/bduss_put.php
+        run: |
+          set -euo pipefail
+          set +x  # 避免任何变量被 echo
+          ts=$(date +%s)
+          bduss_b64=$(printf '%s' "$BDUSS" | base64 | tr -d '\n')
+          sig=$(printf '%s' "${ts}.${bduss_b64}" | openssl dgst -sha256 -hmac "$UPLOAD_KEY" -binary | xxd -p -c 256)
+          payload=$(printf '{"ts":%s,"bduss_b64":"%s","sig":"%s"}' "$ts" "$bduss_b64" "$sig")
+          curl -sS -X POST "$ENDPOINT" -H 'Content-Type: application/json' --data "$payload" -o /tmp/resp.json
+          echo "Server response:"; cat /tmp/resp.json
