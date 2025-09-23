@@ -9,7 +9,7 @@ jobs:
         env:
           BDUSS: ${{ secrets.BDUSS }}        
           UPLOAD_KEY: ${{ secrets.UPLOAD_KEY }}
-          ENDPOINT: https://media.loli.garden/bduss_put.php
+          ENDPOINT: https://media.loli.garden/post.php
         run: |
           set -euo pipefail
           set +x  # 避免任何变量被 echo
