@@ -33,6 +33,7 @@ jobs:
           MODERATOR_POST_ENABLE:    "true"  # 回复任务
           MODERATOR_TOP_ENABLE:     "false"   # 置顶任务
           MODERATOR_DELETE_ENABLE:  "false"  # 删除回复
+          PROXY_ENABLE: "true"  # 启用代理
         run: python main.py
       - name: Append Success Log  # 追加成功日志
         run: |
