@@ -10,6 +10,7 @@ import smtplib
 from email.mime.text import MIMEText
 from urllib.parse import quote
 from json import JSONDecodeError
+import json
 
 # -----------------------------
 # 日志配置
@@ -18,12 +19,12 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # -----------------------------
-# 设备指纹生成
+# 设备指纹生成 (持久化)
 # -----------------------------
 import uuid
 
 def gen_advanced_device():
-    """生成设备指纹，包含真实设备特征"""
+    """生成一套新的设备指纹，包含真实设备特征"""
     # 真实IMEI算法（Luhn校验）
     def generate_valid_imei():
         imei_base = ''.join(random.choices('0123456789', k=14))
@@ -88,9 +89,27 @@ def gen_advanced_device():
         'cuid': cuid
     }
 
-# 全局设备指纹 - 启动时生成一次
-DEVICE = gen_advanced_device()
-logger.info(f"生成设备指纹: {DEVICE['brand']} {DEVICE['model']}, IMEI={DEVICE['imei'][:4]}****, CUID={DEVICE['cuid']}")
+# 全局设备指纹 - 持久化加载或生成
+def get_persistent_device(filename="device_profile.json"):
+    """从文件加载设备指纹，如果文件不存在则生成新的并保存"""
+    try:
+        with open(filename, 'r') as f:
+            device = json.load(f)
+            logger.info(f"从 {filename} 加载设备指纹")
+            return device
+    except (FileNotFoundError, json.JSONDecodeError):
+        logger.info("设备指纹文件不存在或无效，生成新的指纹")
+        device = gen_advanced_device()
+        try:
+            with open(filename, 'w') as f:
+                json.dump(device, f, indent=4)
+                logger.info(f"新设备指纹已保存到 {filename}")
+        except Exception as e:
+            logger.error(f"保存设备指纹失败: {e}")
+        return device
+
+DEVICE = get_persistent_device()
+logger.info(f"当前设备指纹: {DEVICE['brand']} {DEVICE['model']}, IMEI={DEVICE['imei'][:4]}****, CUID={DEVICE['cuid']}")
 
 # 高级UA生成器
 def generate_realistic_ua(device_info):
@@ -151,6 +170,7 @@ def get_headers(is_mobile=False):
 # API 地址
 # -----------------------------
 REPLY_URL   = "http://c.tieba.baidu.com/c/c/post/add"            # 回帖接口（移动端）
+VIEW_POST_URL = "http://c.tieba.baidu.com/c/c/post/thread"       # 查看帖子接口（移动端）
 DELETE_URL  = "http://c.tieba.baidu.com/c/u/comment/postDel"     # 删除回复接口
 SET_TOP_URL = "http://tieba.baidu.com/mo/q"                      # 置顶/取消置顶接口
 TBS_URL     = "http://tieba.baidu.com/dc/common/tbs"             # 获取 tbs
@@ -168,6 +188,8 @@ DO_MODERATOR_DELETE = ENV.get('MODERATOR_DELETE_ENABLE','false').lower() == 'tru
 MODERATOR_BDUSS_INDEX   = ENV.get('MODERATOR_BDUSS_INDEX', '0')
 MODERATED_BARS          = ENV.get('MODERATED_BARS', '')
 TARGET_POST_IDS         = ENV.get('TARGET_POST_IDS', '')
+PROXY_ENABLE            = ENV.get('PROXY_ENABLE', 'false').lower() == 'true'  # 是否使用代理
+SOCKS_PROXY             = ENV.get('SOCKS_PROXY', '')  # 首选代理
 
 # -----------------------------
 # 请求签名 & 常量
@@ -190,6 +212,135 @@ SIGN_DATA    = {
 
 # 全局 Session
 s = requests.Session()
+
+# -----------------------------
+# 代理管理器 (核心重构)
+# -----------------------------
+class ProxyManager:
+    def __init__(self, enable, user_proxy):
+        self.enable = enable
+        self.user_proxy = user_proxy
+        self.backup_proxies = []
+        self.current_proxy_info = "无代理 (原始IP)"
+        if not self.enable:
+            logger.info("代理功能已禁用")
+
+    def _sanitize_proxy_url(self, url):
+        """隐藏代理信息"""
+        if not url or '@' not in url or '//' not in url:
+            return url
+        try:
+            protocol, rest = url.split('//', 1)
+            creds, host_info = rest.split('@', 1)
+            if ':' in creds:
+                user, _ = creds.split(':', 1)
+                return f"{protocol}//{user}:***@{host_info}"
+            else: # 兼容无密码格式 user@host
+                return f"***@{host_info}"
+        except ValueError:
+            # 解析失败，返回原始URL以避免崩溃
+            return url
+        return url
+
+    def get_proxy(self):
+        """获取一个可用的代理配置"""
+        if not self.enable:
+            return None
+
+        # 1. 尝试首选代理
+        if self.user_proxy:
+            safe_proxy_url = self._sanitize_proxy_url(self.user_proxy)
+            logger.info(f"尝试使用首选代理: {safe_proxy_url}")
+            if self.test_proxy(self.user_proxy):
+                self.current_proxy_info = f"首选代理: {safe_proxy_url}"
+                return {'http': self.user_proxy, 'https': self.user_proxy}
+            else:
+                logger.warning("首选代理连接失败")
+                self.user_proxy = None  # 标记为失败，不再尝试
+
+        # 2. 尝试备用代理池
+        if not self.backup_proxies:
+            self.fetch_backup_proxies()
+        
+        while self.backup_proxies:
+            backup_proxy = self.backup_proxies.pop(0)
+            logger.info(f"尝试使用备用代理: {backup_proxy}")
+            if self.test_proxy(backup_proxy):
+                self.current_proxy_info = f"备用代理: {backup_proxy}"
+                return {'http': backup_proxy, 'https': backup_proxy}
+            else:
+                logger.warning("备用代理连接失败")
+
+        # 3. 降级至无代理
+        self.current_proxy_info = "无代理 (降级)"
+        logger.error("所有代理尝试失败，降级为无代理IP")
+        self.enable = False # 彻底关闭代理功能
+        return None
+
+    def fetch_backup_proxies(self):
+        """从 ProxyScrape 获取备用 SOCKS5 代理列表"""
+        logger.info("正在从 ProxyScrape 获取备用代理...")
+        url = "https://api.proxyscrape.com/v2/?request=getproxies&protocol=socks5&timeout=10000&country=all"
+        try:
+            resp = requests.get(url, timeout=10)
+            if resp.status_code == 200:
+                proxies = [f"socks5h://{p}" for p in resp.text.strip().split('\r\n') if p]
+                random.shuffle(proxies)
+                self.backup_proxies = proxies
+                logger.info(f"成功获取 {len(self.backup_proxies)} 个备用代理")
+            else:
+                logger.warning("获取备用代理失败，API 返回状态码非 200")
+        except Exception as e:
+            logger.error(f"获取备用代理时发生网络错误: {e}")
+
+    def test_proxy(self, proxy_url):
+        """测试代理是否能连接到百度"""
+        try:
+            import pysocks
+            proxies = {'https': proxy_url}
+            # 使用一个稳定的小资源进行测试
+            test_url = "https://www.baidu.com/favicon.ico"
+            resp = requests.get(test_url, proxies=proxies, timeout=8)
+            return resp.status_code == 200
+        except ImportError:
+            if not getattr(self, '_pysocks_warning_logged', False):
+                logger.warning("未安装 pysocks 库 (pip install pysocks)，SOCKS5 代理将不会生效")
+                self._pysocks_warning_logged = True
+            return False
+        except Exception as e:
+            logger.debug(f"代理测试失败: {self._sanitize_proxy_url(proxy_url)}, error: {e}")
+            return False
+
+# 初始化代理管理器
+proxy_manager = ProxyManager(PROXY_ENABLE, SOCKS_PROXY)
+
+def robust_request(method, url, **kwargs):
+    """
+    使用代理管理器进行健壮的网络请求，支持失败重试和代理切换。
+    """
+    max_retries = 3
+    for attempt in range(max_retries):
+        proxies = proxy_manager.get_proxy()
+        kwargs['proxies'] = proxies
+        try:
+            # 确保 User-Agent 在重试时也能获取
+            if 'headers' not in kwargs:
+                kwargs['headers'] = get_headers()
+            
+            if method.upper() == 'GET':
+                resp = s.get(url, **kwargs)
+            else:
+                resp = s.post(url, **kwargs)
+            
+            resp.raise_for_status() # 对非2xx状态码抛出异常
+            return resp
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"请求失败 (第 {attempt+1}/{max_retries} 次): {e}")
+            if attempt < max_retries - 1:
+                time.sleep(2) # 重试前等待
+            else:
+                logger.error("请求达到最大重试次数，彻底失败")
+                raise # 将异常重新抛出，让上层逻辑处理
 
 # -----------------------------
 # 风控检测函数
@@ -245,10 +396,11 @@ def get_hitokoto():
     for attempt in range(3):  # 三轮
         for url in HITOKOTO_URLS:  # 每轮依次尝试两个域名
             try:
-                resp = requests.get(
+                resp = robust_request(
+                    'GET',
                     url,
                     headers={'User-Agent': random.choice(USER_AGENTS_DESKTOP)},
-                    timeout=5
+                    timeout=5,
                 )
                 if resp.status_code == 200:
                     data = resp.json()
@@ -311,7 +463,7 @@ def get_tbs(bduss):
     headers.update({COOKIE: f"{BDUSS}={bduss}"})
     for attempt in range(3):
         try:
-            resp = s.get(TBS_URL, headers=headers, timeout=5)
+            resp = robust_request('GET', TBS_URL, headers=headers, timeout=5)
             resp.raise_for_status()
             tbs = resp.json().get('tbs')
             logger.info(f"获取 tbs 完成: {tbs}")
@@ -374,7 +526,7 @@ def get_favorite(bduss):
         }
         data = encodeData(data)
         try:
-            resp = s.post(url=LIKIE_URL, data=data, timeout=10)
+            resp = robust_request('POST', LIKIE_URL, data=data, timeout=10)
             resp.raise_for_status()
             res = resp.json()
         except Exception as e:
@@ -414,7 +566,7 @@ def client_sign(bduss, tbs, fid, kw):
     """执行签到操作"""
     logger.info(f"签到贴吧: {kw}")
     data = {**SIGN_DATA, 'BDUSS': bduss, 'fid': fid, 'kw': kw, 'tbs': tbs, 'timestamp': str(int(time.time()))}
-    resp = s.post(SIGN_URL, headers=get_headers(), cookies={BDUSS: bduss}, data=encodeData(data), timeout=10)
+    resp = robust_request('POST', SIGN_URL, headers=get_headers(), cookies={BDUSS: bduss}, data=encodeData(data), timeout=10)
     try:
         jr = resp.json()
         if check_wind_control(jr):
@@ -426,6 +578,41 @@ def client_sign(bduss, tbs, fid, kw):
 # -----------------------------
 # 4. 吧主任务：回复+删除 & 置顶/取消置顶（优化版）
 # -----------------------------
+def simulate_view_post(bduss, fid, tid):
+    """模拟浏览帖子，为后续操作预热"""
+    logger.info(f"模拟浏览帖子: tid={tid}")
+    view_data = {
+        'BDUSS': bduss,
+        'fid': fid,
+        'tid': tid,
+        'pn': '1', # 页码
+        'rn': '20', # 每页数量
+        'with_floor': '1',
+        'lp': '6',
+        'see_lz': '0', # 是否只看楼主
+        'tbs': get_tbs(bduss), # 查看帖子也需要 tbs
+        '_client_type': '2',
+        '_client_version': SIGN_DATA['_client_version'],
+        '_phone_imei': DEVICE['imei'],
+        'model': DEVICE['model'],
+        '_client_id': DEVICE['client_id'],
+        'cuid': DEVICE['cuid'],
+        'net_type': '1',
+        'timestamp': str(int(time.time())),
+    }
+    try:
+        resp = robust_request('POST', VIEW_POST_URL,
+            headers=get_headers(is_mobile=True),
+            cookies={BDUSS: bduss},
+            data=encodeData(view_data),
+            timeout=10,
+        )
+        logger.info(f"模拟浏览完成 status={resp.status_code}")
+        return True
+    except Exception as e:
+        logger.warning(f"模拟浏览失败: {e}")
+        return False
+
 def moderator_task(bduss, tbs, bar_name, post_id):
     """执行吧主考核任务，采用防检测措施"""
     success = {'reply': False, 'top': False}
@@ -441,7 +628,11 @@ def moderator_task(bduss, tbs, bar_name, post_id):
     cookies = {BDUSS: bduss}
     def rnd_sleep(): time.sleep(random.uniform(3, 8))
     
-    # 1. 回复 & 删除（增强防检测）
+    # 1. 模拟浏览 (预热)
+    simulate_view_post(bduss, fid, post_id)
+    rnd_sleep() # 浏览后随机停顿
+
+    # 2. 回复 & 删除（增强防检测）
     if DO_MODERATOR_POST:
         content = build_reply_content()
         logger.info(f"回复内容: {content}")
@@ -472,12 +663,11 @@ def moderator_task(bduss, tbs, bar_name, post_id):
         }
         
         rnd_sleep()
-        resp = s.post(
-            REPLY_URL,
+        resp = robust_request('POST', REPLY_URL,
             headers=get_headers(is_mobile=True),
             cookies=cookies,
             data=encodeData(reply_data),
-            timeout=15
+            timeout=15,
         )
         try:
             jr = resp.json()
@@ -503,12 +693,11 @@ def moderator_task(bduss, tbs, bar_name, post_id):
                         'cuid': DEVICE['cuid'],
                         'timestamp': str(int(time.time())),
                     }
-                    del_resp = s.post(
-                        DELETE_URL,
+                    del_resp = robust_request('POST', DELETE_URL,
                         headers=get_headers(is_mobile=True),
                         cookies=cookies,
                         data=encodeData(del_data),
-                        timeout=10
+                        timeout=10,
                     )
                     try:
                         jr_del = del_resp.json()
@@ -527,20 +716,18 @@ def moderator_task(bduss, tbs, bar_name, post_id):
     # 2. 置顶 & 取消置顶
     if DO_MODERATOR_TOP:
         rnd_sleep()
-        resp_top = s.get(
-            SET_TOP_URL,
+        resp_top = robust_request('GET', SET_TOP_URL,
             headers=get_headers(is_mobile=True),
             cookies=cookies,
-            params={'tn':'bdTOP','z':post_id,'tbs':tbs,'word':bar_name}
+            params={'tn':'bdTOP','z':post_id,'tbs':tbs,'word':bar_name},
         )
         logger.info(f"置顶返回 status={resp_top.status_code}")
         success['top'] = True
         rnd_sleep()
-        resp_untop = s.get(
-            SET_TOP_URL,
+        resp_untop = robust_request('GET', SET_TOP_URL,
             headers=get_headers(is_mobile=True),
             cookies=cookies,
-            params={'tn':'bdUNTOP','z':post_id,'tbs':tbs,'word':bar_name}
+            params={'tn':'bdUNTOP','z':post_id,'tbs':tbs,'word':bar_name},
         )
         logger.info(f"取消置顶返回 status={resp_untop.status_code}")
     else:
@@ -575,6 +762,7 @@ def send_email(sign_list, total_sign_time, task_status):
             <li>IMEI: {DEVICE['imei'][:4]}****{DEVICE['imei'][-4:]}</li>
             <li>CUID: {DEVICE['cuid'][:8]}...</li>
             <li>客户端版本: {SIGN_DATA['_client_version']}</li>
+            <li>代理状态: {proxy_manager.current_proxy_info}</li>
         </ul>
     </div>
     """
@@ -666,7 +854,7 @@ def get_fid_by_name(bduss, kw):
     headers = get_headers()
     headers.update({COOKIE: f"{BDUSS}={bduss}"})
     try:
-        resp = s.get(url, headers=headers, timeout=10)
+        resp = robust_request('GET', url, headers=headers, timeout=10)
         resp.raise_for_status()
         data = resp.json().get('data', {})
         fid = data.get('fid')
