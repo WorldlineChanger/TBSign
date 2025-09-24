@@ -222,60 +222,56 @@ class ProxyManager:
         self.user_proxy = user_proxy
         self.backup_proxies = []
         self.current_proxy_info = "无代理 (原始IP)"
+        self.first_success_logged = False # 新增状态，用于控制日志只输出一次
         if not self.enable:
             logger.info("代理功能已禁用")
 
     def _sanitize_proxy_url(self, url):
-        """隐藏代理信息"""
-        if not url or '@' not in url or '//' not in url:
-            return url
+        """隐藏代理信息，包括用户名、密码和IP地址"""
+        if not url:
+            return "无代理"
         try:
-            protocol, rest = url.split('//', 1)
-            creds, host_info = rest.split('@', 1)
-            if ':' in creds:
-                user, _ = creds.split(':', 1)
-                return f"{protocol}//{user}:***@{host_info}"
-            else: # 兼容无密码格式 user@host
-                return f"***@{host_info}"
-        except ValueError:
-            # 解析失败，返回原始URL以避免崩溃
-            return url
-        return url
+            import re
+            # 隐藏IP地址，只保留第一段
+            sanitized_url = re.sub(r'(\d{1,3})\.\d{1,3}\.\d{1,3}\.\d{1,3}', r'\1.***.***.***', url)
+            
+            # 隐藏密码
+            if '@' in sanitized_url and '//' in sanitized_url:
+                protocol, rest = sanitized_url.split('//', 1)
+                creds, host_info = rest.split('@', 1)
+                if ':' in creds:
+                    user, _ = creds.split(':', 1)
+                    return f"{protocol}//{user}:***@{host_info}"
+                else: # 兼容无密码格式 user@host
+                    return f"{protocol}//***@{host_info}"
+            return sanitized_url
+        except Exception:
+            return "格式错误的代理地址"
 
-    def get_proxy(self):
-        """获取一个可用的代理配置"""
+    def _sanitize_ip(self, ip):
+        """隐藏IP地址，只保留第一部分"""
+        if not ip:
+            return ""
+        parts = ip.split('.')
+        if len(parts) == 4:
+            return f"{parts[0]}.***.***.***"
+        return ip # 如果不是标准IPv4格式，直接返回
+
+    def get_proxy_list(self):
+        """获取一个包含所有可用代理的列表，首选代理在前，最后是None（直连）"""
         if not self.enable:
-            return None
+            return [None]
 
-        # 1. 尝试首选代理
+        proxies = []
         if self.user_proxy:
-            safe_proxy_url = self._sanitize_proxy_url(self.user_proxy)
-            logger.info(f"尝试使用首选代理: {safe_proxy_url}")
-            if self.test_proxy(self.user_proxy):
-                self.current_proxy_info = f"首选代理: {safe_proxy_url}"
-                return {'http': self.user_proxy, 'https': self.user_proxy}
-            else:
-                logger.warning("首选代理连接失败")
-                self.user_proxy = None  # 标记为失败，不再尝试
+            proxies.append(self.user_proxy)
 
-        # 2. 尝试备用代理池
         if not self.backup_proxies:
             self.fetch_backup_proxies()
-        
-        while self.backup_proxies:
-            backup_proxy = self.backup_proxies.pop(0)
-            logger.info(f"尝试使用备用代理: {backup_proxy}")
-            if self.test_proxy(backup_proxy):
-                self.current_proxy_info = f"备用代理: {backup_proxy}"
-                return {'http': backup_proxy, 'https': backup_proxy}
-            else:
-                logger.warning("备用代理连接失败")
+        proxies.extend(self.backup_proxies)
 
-        # 3. 降级至无代理
-        self.current_proxy_info = "无代理 (降级)"
-        logger.error("所有代理尝试失败，降级为无代理IP")
-        self.enable = False # 彻底关闭代理功能
-        return None
+        proxies.append(None) # 添加None作为直连的最终选项
+        return proxies
 
     def fetch_backup_proxies(self):
         """从 ProxyScrape 获取备用 SOCKS5 代理列表"""
@@ -293,26 +289,31 @@ class ProxyManager:
         except Exception as e:
             logger.error(f"获取备用代理时发生网络错误: {e}")
 
-    def test_proxy(self, proxy_url):
-        """测试代理是否能连接到 ipinfo.io"""
+    def test_and_log_success(self, proxy_url):
+        """测试代理并记录首次成功日志"""
+        if self.first_success_logged:
+            return
+
+        safe_proxy_url = self._sanitize_proxy_url(proxy_url)
+        logger.info(f"测试连接有效性: {safe_proxy_url}")
         try:
             import socks
-            proxies = {'http': proxy_url, 'https': proxy_url}
-            # 使用全球稳定的IP信息服务进行测试
+            proxies = {'http': proxy_url, 'https': proxy_url} if proxy_url else None
             test_url = "https://ipinfo.io/ip"
             resp = requests.get(test_url, proxies=proxies, timeout=10)
             if resp.status_code == 200:
-                logger.info(f"代理测试成功，出口 IP: {resp.text.strip()}")
-                return True
-            return False
+                sanitized_ip = self._sanitize_ip(resp.text.strip())
+                self.current_proxy_info = f"{safe_proxy_url} (出口IP: {sanitized_ip})"
+                logger.info(f"连接测试成功，当前使用: {self.current_proxy_info}")
+                self.first_success_logged = True
+            else:
+                 logger.warning(f"连接测试失败，状态码: {resp.status_code}")
         except ImportError:
             if not getattr(self, '_pysocks_warning_logged', False):
                 logger.warning("未安装 PySocks 库 (pip install PySocks)，SOCKS5 代理将不会生效")
                 self._pysocks_warning_logged = True
-            return False
         except Exception as e:
-            logger.debug(f"代理测试失败: {self._sanitize_proxy_url(proxy_url)}, error: {e}")
-            return False
+            logger.debug(f"连接测试异常: {safe_proxy_url}, error: {e}")
 
 # 初始化代理管理器
 proxy_manager = ProxyManager(PROXY_ENABLE, SOCKS_PROXY)
@@ -322,11 +323,22 @@ def robust_request(method, url, **kwargs):
     使用代理管理器进行健壮的网络请求，支持失败重试和代理切换。
     """
     max_retries = 3
+    proxy_list = proxy_manager.get_proxy_list()
+    last_exception = None
+
     for attempt in range(max_retries):
-        proxies = proxy_manager.get_proxy()
+        # 从代理列表中选择一个代理，如果列表耗尽则使用最后一个（应该是None）
+        proxy_index = min(attempt, len(proxy_list) - 1)
+        current_proxy = proxy_list[proxy_index]
+        
+        proxies = {'http': current_proxy, 'https': current_proxy} if current_proxy else None
+        
+        # 准备日志信息
+        proxy_info_for_log = proxy_manager._sanitize_proxy_url(current_proxy)
+        logger.info(f"请求尝试 ({attempt+1}/{max_retries}) 使用: {proxy_info_for_log}")
+
         kwargs['proxies'] = proxies
         try:
-            # 确保 User-Agent 在重试时也能获取
             if 'headers' not in kwargs:
                 kwargs['headers'] = get_headers()
             
@@ -335,15 +347,22 @@ def robust_request(method, url, **kwargs):
             else:
                 resp = s.post(url, **kwargs)
             
-            resp.raise_for_status() # 对非2xx状态码抛出异常
+            resp.raise_for_status()
+
+            # 请求成功后，进行一次性的连接测试和日志记录
+            proxy_manager.test_and_log_success(current_proxy)
+            
             return resp
         except requests.exceptions.RequestException as e:
-            logger.warning(f"请求失败 (第 {attempt+1}/{max_retries} 次): {e}")
+            last_exception = e
+            logger.warning(f"请求失败: {e}")
             if attempt < max_retries - 1:
-                time.sleep(2) # 重试前等待
+                if proxy_index == len(proxy_list) - 1:
+                    logger.warning("所有代理已尝试完毕，最后一次重试将继续使用直连。")
+                time.sleep(2)
             else:
                 logger.error("请求达到最大重试次数，彻底失败")
-                raise # 将异常重新抛出，让上层逻辑处理
+                raise last_exception
 
 # -----------------------------
 # 风控检测函数
