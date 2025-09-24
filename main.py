@@ -294,17 +294,20 @@ class ProxyManager:
             logger.error(f"获取备用代理时发生网络错误: {e}")
 
     def test_proxy(self, proxy_url):
-        """测试代理是否能连接到百度"""
+        """测试代理是否能连接到 ipinfo.io"""
         try:
-            import pysocks
-            proxies = {'https': proxy_url}
-            # 使用一个稳定的小资源进行测试
-            test_url = "https://www.baidu.com/favicon.ico"
-            resp = requests.get(test_url, proxies=proxies, timeout=8)
-            return resp.status_code == 200
+            import socks
+            proxies = {'http': proxy_url, 'https': proxy_url}
+            # 使用全球稳定的IP信息服务进行测试
+            test_url = "https://ipinfo.io/ip"
+            resp = requests.get(test_url, proxies=proxies, timeout=10)
+            if resp.status_code == 200:
+                logger.info(f"代理测试成功，出口 IP: {resp.text.strip()}")
+                return True
+            return False
         except ImportError:
             if not getattr(self, '_pysocks_warning_logged', False):
-                logger.warning("未安装 pysocks 库 (pip install pysocks)，SOCKS5 代理将不会生效")
+                logger.warning("未安装 PySocks 库 (pip install PySocks)，SOCKS5 代理将不会生效")
                 self._pysocks_warning_logged = True
             return False
         except Exception as e:
