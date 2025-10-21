@@ -697,16 +697,38 @@ def get_favorite_fast(bduss: str):
 # -----------------------------
 # 3. 客户端签到（AIO）
 # -----------------------------
-async def client_sign(client: "aiotieba.Client", fid, kw):
+async def client_sign(client: "aiotieba.Client", fid, kw, bduss: str, stoken: str):  # 新增 bduss, stoken 参数
     """执行签到操作（AIO）"""
     logger.info(f"签到贴吧: {kw}")
+    # 先用现有 client（首选代理/环境代理）尝试一次
     try:
-        # aiotieba 自动处理 tbs/sign 等
         r = await client.sign_forum(kw)
         return {'error_code': 0 if not r.err else -1, 'data': {'raw': str(r.err) if r.err else 'ok'}}
     except Exception as e:
-        logger.warning("签到异常: %s", e)
-        return {'error_code': -1, 'msg': str(e)}
+        logger.warning("签到异常(默认代理): %s", e)
+
+    # 若失败：恢复“代理 -> 免费代理 -> 直连”的健壮重试链
+    max_retries = 3
+    proxy_list = proxy_manager.get_proxy_list()
+    for attempt in range(1, max_retries):
+        proxy_index = min(attempt, len(proxy_list) - 1)
+        current_proxy = proxy_list[proxy_index]
+        proxy_info_for_log = proxy_manager._sanitize_proxy_url(current_proxy)
+        logger.info(f"请求尝试 ({attempt+1}/{max_retries}) 使用: {proxy_info_for_log}")
+        try:
+            proxy_param = ProxyConfig(url=current_proxy) if current_proxy else False
+            async with aiotieba.Client(BDUSS=bduss, STOKEN=stoken, proxy=proxy_param) as tmp_client:
+                r = await tmp_client.sign_forum(kw)
+            if not r.err:
+                proxy_manager.test_and_log_success(current_proxy)
+                return {'error_code': 0, 'data': {'raw': 'ok'}}
+            else:
+                logger.warning(f"签到失败: {r.err}")
+        except Exception as e2:
+            logger.warning(f"请求失败: {e2}")
+        await asyncio.sleep(random.uniform(1, 2))
+
+    return {'error_code': -1, 'msg': 'sign failed after retries'}
 
 # -----------------------------
 # 4. 吧主任务：回复+删除 & 置顶/取消置顶（AIO）
@@ -1037,7 +1059,8 @@ async def async_main():
             # 签到
             for f in favorites:
                 await asyncio.sleep(random.uniform(1, 3))
-                await client_sign(client, f['id'], f['name'])
+                # 补充 bduss/stoken 以便在失败时重建临时 client 进行代理切换
+                await client_sign(client, f['id'], f['name'], bduss, stoken)
 
             total_sign_time += int(time.time() - start_time)
 
