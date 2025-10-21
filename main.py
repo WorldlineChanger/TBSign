@@ -595,6 +595,24 @@ async def get_tbs(bduss: str):
     logger.info(f"获取 tbs 完成: {tbs}")
     return tbs
 
+def get_tbs_sync(bduss: str):
+    """同步获取 tbs（用于老版 requests 签到路径）"""
+    logger.info("获取 tbs 开始")
+    headers = get_headers()
+    headers.update({COOKIE: f"{BDUSS}={bduss}"})
+    for attempt in range(3):
+        try:
+            resp = robust_request('GET', TBS_URL, headers=headers, timeout=5)
+            resp.raise_for_status()
+            tbs = resp.json().get('tbs')
+            logger.info(f"获取 tbs 完成: {tbs}")
+            return tbs
+        except Exception as e:
+            logger.warning(f"获取 tbs 第{attempt+1}次失败: {e}")
+            time.sleep(2)
+    logger.error("获取 tbs 失败，签到中止")
+    raise RuntimeError("TBS 获取失败")
+
 # -----------------------------
 # 错误语义判别（最小关键字法，避免把权限问题误判未登录）
 # -----------------------------
@@ -695,83 +713,68 @@ def get_favorite_fast(bduss: str):
     return collected
 
 # -----------------------------
-# 3. 客户端签到（AIO）
+# 3. 客户端签到
 # -----------------------------
-def _is_already_signed_err(err_obj) -> bool:
-    """判断是否为'已签到'错误，避免无谓重试"""
-    if not err_obj:
-        return False
-    # 形态1：元组/列表 (160002, '亲，你之前已经签过了')
-    if isinstance(err_obj, (tuple, list)) and err_obj:
-        code = err_obj[0]
-        try:
-            code_int = int(str(code))
-            if code_int == 160002:
-                return True
-        except Exception:
-            pass
-        # 文案兜底
-        msg = " ".join(map(str, err_obj)).lower()
-        if "已经签" in msg or "already" in msg or "signed" in msg:
-            return True
-    # 形态2：字符串
-    s = str(err_obj)
-    if "160002" in s:
-        return True
-    if "已经签" in s or "already" in s or "signed" in s:
-        return True
-    return False
-
-async def client_sign(client: "aiotieba.Client", fid, kw, bduss: str, stoken: str):
-    """执行签到操作（AIO）首选代理-免费代理-直连 三段式重试"""
+def client_sign(bduss, tbs, fid, kw):
+    """执行签到操作 + 代理降级；每条线路最多重试3次"""
     logger.info(f"签到贴吧: {kw}")
-    # 先用现有 client（首选代理/环境代理）
-    try:
-        r = await client.sign_forum(kw)
-        if not getattr(r, "err", None):
-            return {'error_code': 0, 'data': {'raw': 'ok'}}
-        # 有错误但不是异常：判断是否为已签到；是则直接视为成功并不重试
-        if _is_already_signed_err(r.err):
-            return {'error_code': 0, 'data': {'raw': 'already signed'}}
-        # 其它错误才进入重试链
-        logger.warning(f"签到异常(默认代理返回错误): {r.err}")
-    except Exception as e:
-        logger.warning("签到异常(默认代理抛异常): %s", e)
 
-    # 组装固定两步链，确保最后一步一定直连
-    # 从 ProxyManager 取免费代理（与自定义不同且非 None）
+    # 构造参数（保持原有字段/签名）
+    data = {**SIGN_DATA, 'BDUSS': bduss, 'fid': fid, 'kw': kw, 'tbs': tbs, 'timestamp': str(int(time.time()))}
+    encoded_data = encodeData(dict(data))  # 避免被重用时 sign 字段残留
+    headers = get_headers()  # 不强制 is_mobile
+    cookies = {BDUSS: bduss}
+
+    # 三段式线路：首选代理 -> 第一条免费代理 -> 直连
+    chain = []
+    # 1.自定义代理
+    if PROXY_ENABLE and SOCKS_PROXY:
+        chain.append(SOCKS_PROXY)
+    # 2.第一条免费代理
     backup_proxy = None
-    proxy_list_full = proxy_manager.get_proxy_list()  # [user_proxy?, backup..., None]
-    for p in proxy_list_full:
-        if p and p != SOCKS_PROXY:  # 选择第一条免费代理
-            backup_proxy = p
-            break
-    fallback_chain = []
+    try:
+        proxy_list_full = proxy_manager.get_proxy_list()  # [user_proxy?, backup..., None]
+        for p in proxy_list_full:
+            if p and p != SOCKS_PROXY:
+                backup_proxy = p
+                break
+    except Exception:
+        backup_proxy = None
     if backup_proxy:
-        fallback_chain.append(backup_proxy)
-    fallback_chain.append(None)  # 最后一跳强制直连
+        chain.append(backup_proxy)
+    # 3.直连
+    chain.append(None)
 
-    total_steps = 1 + len(fallback_chain)  # 含最初默认尝试
-    # 执行 fallback，两步最多
-    for step_idx, p in enumerate(fallback_chain, start=2):  # 日志编号与旧版一致：2/3、3/3
+    total_paths = len(chain)
+
+    for path_idx, p in enumerate(chain, start=1):
         proxy_info_for_log = proxy_manager._sanitize_proxy_url(p)
-        logger.info(f"请求尝试 ({step_idx}/{total_steps}) 使用: {proxy_info_for_log}")
-        try:
-            proxy_param = ProxyConfig(url=p) if p else False
-            async with aiotieba.Client(BDUSS=bduss, STOKEN=stoken, proxy=proxy_param) as tmp_client:
-                r2 = await tmp_client.sign_forum(kw)
-            if not getattr(r2, "err", None):
-                proxy_manager.test_and_log_success(p)
-                return {'error_code': 0, 'data': {'raw': 'ok'}}
-            if _is_already_signed_err(r2.err):
-                proxy_manager.test_and_log_success(p)
-                return {'error_code': 0, 'data': {'raw': 'already signed'}}
-            logger.warning(f"签到失败: {r2.err}")
-        except Exception as e2:
-            logger.warning(f"请求失败: {e2}")
-        await asyncio.sleep(random.uniform(1, 2))
+        logger.info(f"请求尝试 ({path_idx}/{total_paths}) 使用: {proxy_info_for_log}")
+        proxies = {'http': p, 'https': p} if p else None
 
-    return {'error_code': -1, 'msg': 'sign failed after retries'}
+        # 每条线路内部重试 3 次
+        for inner_try in range(1, 4):
+            try:
+                resp = s.post(SIGN_URL, headers=headers, cookies=cookies, data=encoded_data, proxies=proxies, timeout=10)
+                resp.raise_for_status()
+                # 记录一次连通成功（仅首成功打印出口IP）
+                proxy_manager.test_and_log_success(p)
+                try:
+                    jr = resp.json()
+                except JSONDecodeError:
+                    return {'error_code': 0}
+                if check_wind_control(jr):
+                    return jr
+                return jr
+            except requests.exceptions.RequestException as e:
+                logger.warning(f"签到请求失败(第{inner_try}/3): {e}")
+                if inner_try < 3:
+                    time.sleep(random.uniform(3.0, 5.0))  # 间隔后再试
+                else:
+                    logger.warning("该线路3次均失败，切换下一线路")
+
+    # 所有线路均失败
+    return {'error_code': -1, 'msg': 'sign failed after per-path retries'}
 
 # -----------------------------
 # 4. 吧主任务：回复+删除 & 置顶/取消置顶（AIO）
@@ -1075,8 +1078,12 @@ async def async_main():
 
         # 使用异步上下文管理器管理连接
         async with aiotieba.Client(BDUSS=bduss, STOKEN=stoken, proxy=proxy_cfg) as client:
-            # 获取 tbs（占位）
-            _ = await get_tbs(bduss)
+            # 同步获取 tbs 给旧版签到使用
+            try:
+                tbs = get_tbs_sync(bduss)
+            except Exception:
+                # 获取 tbs 失败直接跳过该账号
+                continue
 
             # 关注列表
             try:
@@ -1102,8 +1109,7 @@ async def async_main():
             # 签到
             for f in favorites:
                 await asyncio.sleep(random.uniform(1, 3))
-                # 补充 bduss/stoken 以便在失败时重建临时 client 进行代理切换
-                await client_sign(client, f['id'], f['name'], bduss, stoken)
+                client_sign(bduss, tbs, f['id'], f['name'])
 
             total_sign_time += int(time.time() - start_time)
 
