@@ -196,6 +196,7 @@ SOCKS_PROXY             = ENV.get('SOCKS_PROXY', '')  # 首选代理
 # -----------------------------
 COOKIE       = "Cookie"
 BDUSS        = "BDUSS"
+STOKEN_ENV   = "STOKEN"
 SIGN_KEY     = 'tiebaclient!!!'
 UTF8         = "utf-8"
 
@@ -475,283 +476,171 @@ def encodeData(data):
     data['sign'] = sign
     return data
 
-# -----------------------------
-# 1. 获取 tbs
-# -----------------------------
-def get_tbs(bduss):
-    """获取图形验证码 tbs，用于各种签名接口"""
-    logger.info("获取 tbs 开始")
-    headers = get_headers()
-    headers.update({COOKIE: f"{BDUSS}={bduss}"})
-    for attempt in range(3):
-        try:
-            resp = robust_request('GET', TBS_URL, headers=headers, timeout=5)
-            resp.raise_for_status()
-            tbs = resp.json().get('tbs')
-            logger.info(f"获取 tbs 完成: {tbs}")
-            return tbs
-        except Exception as e:
-            logger.warning(f"获取 tbs 第{attempt+1}次失败: {e}")
-            time.sleep(2)
-    logger.error("获取 tbs 失败，签到中止")
-    raise RuntimeError("TBS 获取失败")
+# =============================
+#  Tieba 交互全面切到 aio（aiotieba）
+# =============================
+import asyncio
+try:
+    import aiotieba
+    from aiotieba import ProxyConfig, TimeoutConfig
+except Exception as _e:
+    logger.error("未安装 aiotieba，请先 `pip install aiotieba`，错误: %s", _e)
+    raise
+
+def _build_aiotieba_proxy():
+    """
+    将现有 SOCKS_PROXY / PROXY_ENABLE 映射到 aiotieba 的 ProxyConfig
+    """
+    if not PROXY_ENABLE:
+        return False
+    if SOCKS_PROXY:
+        # 直接指定代理URL（支持 socks5 / http 等）
+        return ProxyConfig(url=SOCKS_PROXY)
+    # 启用环境变量代理（与原逻辑兼容）
+    return True
 
 # -----------------------------
-# 2. 获取关注的贴吧
+# 1. 获取 tbs（由 aiotieba 内部维护，保持壳与日志）
 # -----------------------------
-def get_favorite(bduss):
-    """获取用户关注的贴吧列表（稳健分页 + 扁平化 + 去重 + 字段规范化）"""
+async def get_tbs(bduss: str):
+    """获取图形验证码 tbs，用于各种签名接口（AIO：由 aiotieba 维护，保留占位）"""
+    logger.info("获取 tbs 开始")
+    # aiotieba 内部会在需要时自动获取/更新 tbs，这里返回占位并保持日志格式
+    tbs = "aiotieba_managed"
+    logger.info(f"获取 tbs 完成: {tbs}")
+    return tbs
+
+# -----------------------------
+# 2. 获取关注的贴吧（AIO）
+# -----------------------------
+async def get_favorite(client: "aiotieba.Client"):
+    """获取用户关注的贴吧列表（稳健分页 + 扁平化 + 去重 + 字段规范化）（AIO）"""
     logger.info("获取关注的贴吧开始")
     collected = []
     seen = set()
-    page_no = 1
 
-    def _normalize(item: dict):
-        """规范化单条数据，确保包含 id / name 字段"""
-        if not isinstance(item, dict):
-            return None
-        fid = str(item.get('id') or item.get('fid') or item.get('forum_id') or '').strip()
-        name = item.get('name') or item.get('fname') or item.get('forum_name')
-        if not fid or not name:
-            return None
-        # 复制并补全标准键
-        obj = dict(item)
-        obj['id'] = fid
-        obj['name'] = str(name)
-        return obj
-
-    def _add(item):
-        obj = _normalize(item)
-        if not obj:
-            return
-        fid = obj['id']
-        if fid in seen:
-            return
-        seen.add(fid)
-        collected.append(obj)
-
+    # aiotieba: get_self_follow_forums 支持自动分页
+    page = 1
     while True:
-        data = {
-            'BDUSS': bduss,
-            '_client_type': '2',
-            '_client_id': DEVICE['client_id'],
-            '_client_version': SIGN_DATA['_client_version'],
-            '_phone_imei': DEVICE['imei'],
-            'cuid': DEVICE['cuid'],
-            'from': '1008621y',
-            'page_no': str(page_no),
-            'page_size': '200',
-            'model': DEVICE['model'],
-            'net_type': '1',
-            'timestamp': str(int(time.time())),
-            'vcode_tag': '11',
-        }
-        data = encodeData(data)
-        try:
-            resp = robust_request('POST', LIKIE_URL, data=data, timeout=10)
-            resp.raise_for_status()
-            res = resp.json()
-        except Exception as e:
-            logger.error("获取关注的贴吧出错: %s", e)
+        res = await client.get_self_follow_forums()  # 一次取一页，库内部已封装
+        if res.err:
+            logger.error("获取关注的贴吧出错: %s", res.err)
             break
-
-        flist = res.get('forum_list', {})
-        if not isinstance(flist, dict):
-            flist = {}
-        # 兼容不同结构：可能是 list、list[list]、或单 dict
-        for section in ('non-gconforum', 'gconforum'):
-            v = flist.get(section, [])
-            if isinstance(v, list):
-                for item in v:
-                    if isinstance(item, list):
-                        for sub in item:
-                            _add(sub)
-                    else:
-                        _add(item)
-            elif isinstance(v, dict):
-                _add(v)
-
-        logger.info(f"第{page_no}页累计收集 {len(collected)} 个")
-        has_more = (str(res.get('has_more', '0')) == '1')  # 兼容整型/字符串
-        if not has_more:
+        for it in res.objs:
+            fid = str(it.fid)
+            if fid in seen:
+                continue
+            seen.add(fid)
+            collected.append({
+                'id': fid,
+                'name': it.fname,
+                'slogan': '无',  # SelfFollowForum 不含简介字段，沿用原邮件结构
+            })
+        logger.info(f"第{page}页累计收集 {len(collected)} 个")
+        if not res.has_more:
             break
-        page_no += 1
-        time.sleep(0.2)  # 轻微间隔
+        page += 1
+        await asyncio.sleep(0.2)
 
     logger.info("获取关注的贴吧结束，共 %d 个", len(collected))
     return collected
 
 # -----------------------------
-# 3. 客户端签到
+# 3. 客户端签到（AIO）
 # -----------------------------
-def client_sign(bduss, tbs, fid, kw):
-    """执行签到操作"""
+async def client_sign(client: "aiotieba.Client", fid, kw):
+    """执行签到操作（AIO）"""
     logger.info(f"签到贴吧: {kw}")
-    data = {**SIGN_DATA, 'BDUSS': bduss, 'fid': fid, 'kw': kw, 'tbs': tbs, 'timestamp': str(int(time.time()))}
-    resp = robust_request('POST', SIGN_URL, headers=get_headers(), cookies={BDUSS: bduss}, data=encodeData(data), timeout=10)
     try:
-        jr = resp.json()
-        if check_wind_control(jr):
-            return jr
-        return jr
-    except JSONDecodeError:
-        return {'error_code': 0}
+        # aiotieba 自动处理 tbs/sign 等
+        r = await client.sign_forum(kw)
+        # 返回与原来兼容的结构（尽量）
+        return {'error_code': 0 if not r.err else -1, 'data': {'raw': str(r.err) if r.err else 'ok'}}
+    except Exception as e:
+        logger.warning("签到异常: %s", e)
+        return {'error_code': -1, 'msg': str(e)}
 
 # -----------------------------
-# 4. 吧主任务：回复+删除 & 置顶/取消置顶（优化版）
+# 4. 吧主任务：回复+删除 & 置顶/取消置顶（AIO）
 # -----------------------------
-def simulate_view_post(bduss, fid, tid):
-    """模拟浏览帖子，为后续操作预热"""
+async def simulate_view_post(client: "aiotieba.Client", fid, tid):
+    """模拟浏览帖子，为后续操作预热（AIO）"""
     logger.info(f"模拟浏览帖子: tid={tid}")
-    view_data = {
-        'BDUSS': bduss,
-        'fid': fid,
-        'tid': tid,
-        'pn': '1', # 页码
-        'rn': '20', # 每页数量
-        'with_floor': '1',
-        'lp': '6',
-        'see_lz': '0', # 是否只看楼主
-        'tbs': get_tbs(bduss), # 查看帖子也需要 tbs
-        '_client_type': '2',
-        '_client_version': SIGN_DATA['_client_version'],
-        '_phone_imei': DEVICE['imei'],
-        'model': DEVICE['model'],
-        '_client_id': DEVICE['client_id'],
-        'cuid': DEVICE['cuid'],
-        'net_type': '1',
-        'timestamp': str(int(time.time())),
-    }
     try:
-        resp = robust_request('POST', VIEW_POST_URL,
-            headers=get_headers(is_mobile=True),
-            cookies={BDUSS: bduss},
-            data=encodeData(view_data),
-            timeout=10,
-        )
-        logger.info(f"模拟浏览完成 status={resp.status_code}")
+        _ = await client.get_posts(tid, pn=1)
+        logger.info("模拟浏览完成")
         return True
     except Exception as e:
         logger.warning(f"模拟浏览失败: {e}")
         return False
 
-def moderator_task(bduss, tbs, bar_name, post_id):
-    """执行吧主考核任务，采用防检测措施"""
+async def moderator_task(client: "aiotieba.Client", bar_name, post_id):
+    """执行吧主考核任务，采用防检测措施（AIO）"""
     success = {'reply': False, 'top': False}
     if not DO_MODERATOR_TASK:
         return success
-    # 开始吧主任务日志
+
     logger.info(f"开始吧主任务: {bar_name}, post_id={post_id}")
     try:
-        fid = get_fid_by_name(bduss, bar_name)
+        fid = await get_fid_by_name(client, bar_name)
     except Exception as e:
         logger.error(f"获取 fid 失败: {e}")
         return success
-    cookies = {BDUSS: bduss}
-    def rnd_sleep(): time.sleep(random.uniform(3, 8))
+
+    async def rnd_sleep():
+        await asyncio.sleep(random.uniform(3, 8))
     
     # 1. 模拟浏览 (预热)
-    simulate_view_post(bduss, fid, post_id)
-    rnd_sleep() # 浏览后随机停顿
+    await simulate_view_post(client, fid, int(post_id))
+    await rnd_sleep()
 
-    # 2. 回复 & 删除（增强防检测）
+    # 2. 回复 & 删除
     if DO_MODERATOR_POST:
         content = build_reply_content()
         logger.info(f"回复内容: {content}")
-        
-        # 构造完整的防检测参数
-        current_timestamp = int(time.time())
-        current_timestamp_ms = int(time.time() * 1000)
-        
-        reply_data = {
-            'BDUSS': bduss,
-            'content': content,
-            'fid': fid,
-            'tid': post_id,
-            # 'kw': bar_name,
-            'tbs': tbs,
-            '_client_type': '2',
-            '_client_version': SIGN_DATA['_client_version'],
-            '_phone_imei': DEVICE['imei'],
-            'model': DEVICE['model'],
-            '_client_id': DEVICE['client_id'],
-            'cuid': DEVICE['cuid'],
-            'net_type': '1',
-            'timestamp': str(current_timestamp),
-            'vcode_tag': '11',
-            'is_adlay': '1',
-            'mouse_pwd_t': str(current_timestamp_ms),
-            'mouse_pwd': str(current_timestamp_ms),
-        }
-        
-        rnd_sleep()
-        resp = robust_request('POST', REPLY_URL,
-            headers=get_headers(is_mobile=True),
-            cookies=cookies,
-            data=encodeData(reply_data),
-            timeout=15,
-        )
         try:
-            jr = resp.json()
-            logger.info(f"回复接口返回: {jr}")
-            if check_wind_control(jr):
-                return success
-            if str(jr.get('error_code', '')) == '0' or jr.get('msg') == '发送成功':
+            # aiotieba 发帖（回帖）
+            add_res = await client.add_post(int(post_id), content)
+            if add_res.err:
+                logger.error(f"回复失败: {add_res.err}")
+            else:
                 success['reply'] = True
-                pid = jr.get('data', {}).get('post_id') or jr.get('pid')
+                pid = getattr(add_res, "pid", None)
                 logger.info(f"回复成功 pid={pid}")
                 # 删除回复
                 if DO_MODERATOR_DELETE and pid:
-                    rnd_sleep()
-                    del_data = {
-                        'BDUSS': bduss,
-                        'post_id': pid, 
-                        'del_type': '0', 
-                        'tbs': tbs,
-                        '_client_type': '2',
-                        '_client_version': SIGN_DATA['_client_version'],
-                        '_phone_imei': DEVICE['imei'],
-                        'model': DEVICE['model'],
-                        'cuid': DEVICE['cuid'],
-                        'timestamp': str(int(time.time())),
-                    }
-                    del_resp = robust_request('POST', DELETE_URL,
-                        headers=get_headers(is_mobile=True),
-                        cookies=cookies,
-                        data=encodeData(del_data),
-                        timeout=10,
-                    )
-                    try:
-                        jr_del = del_resp.json()
-                        logger.info(f"删除回复 status={del_resp.status_code}, response: {jr_del}")
-                    except JSONDecodeError:
-                        logger.info(f"删除回复 status={del_resp.status_code}, 无 JSON 返回")
+                    await rnd_sleep()
+                    del_res = await client.del_post(int(post_id), int(pid))
+                    if del_res.err:
+                        logger.info(f"删除回复失败: {del_res.err}")
+                    else:
+                        logger.info("删除回复成功")
                 else:
                     logger.info("删除操作已关闭或 pid 缺失")
-            else:
-                logger.error(f"回复失败: {jr}")
         except Exception as e:
             logger.error(f"回复/删除阶段失败: {e}")
     else:
         logger.info("发帖操作已关闭")
     
-    # 2. 置顶 & 取消置顶
+    # 3. 置顶 & 取消置顶
     if DO_MODERATOR_TOP:
-        rnd_sleep()
-        resp_top = robust_request('GET', SET_TOP_URL,
-            headers=get_headers(is_mobile=True),
-            cookies=cookies,
-            params={'tn':'bdTOP','z':post_id,'tbs':tbs,'word':bar_name},
-        )
-        logger.info(f"置顶返回 status={resp_top.status_code}")
-        success['top'] = True
-        rnd_sleep()
-        resp_untop = robust_request('GET', SET_TOP_URL,
-            headers=get_headers(is_mobile=True),
-            cookies=cookies,
-            params={'tn':'bdUNTOP','z':post_id,'tbs':tbs,'word':bar_name},
-        )
-        logger.info(f"取消置顶返回 status={resp_untop.status_code}")
+        try:
+            await rnd_sleep()
+            # aiotieba 的 top / untop，一般需要 STOKEN；无 STOKEN 时返回权限相关错误
+            top_res = await client.top(bar_name.rstrip("吧"), int(post_id))
+            if top_res.err:
+                logger.warning(f"置顶失败: {top_res.err}（可能需要 STOKEN）")
+            else:
+                success['top'] = True
+                logger.info("置顶成功")
+            await rnd_sleep()
+            untop_res = await client.untop(bar_name.rstrip("吧"), int(post_id))
+            if untop_res.err:
+                logger.warning(f"取消置顶失败: {untop_res.err}（可能需要 STOKEN）")
+            else:
+                logger.info("取消置顶成功")
+        except Exception as e:
+            logger.error(f"置顶/取消置顶阶段失败: {e}")
     else:
         logger.info("置顶操作已关闭")
     return success
@@ -860,54 +749,49 @@ def format_time(seconds):
         return f"{remaining}秒"
 
 # -----------------------------
-# 根据吧名获取 fid
+# 根据吧名获取 fid（AIO）
 # -----------------------------
-def get_fid_by_name(bduss, kw):
+async def get_fid_by_name(client: "aiotieba.Client", kw):
     """
     根据吧名获取 fid：
       1. 去掉末尾的“吧”字
-      2. 调用分享接口并解析 JSON 返回的 data.fid
+      2. 通过 aiotieba.get_fid 获取
     """
     name = kw.rstrip("吧")
-    url = (
-        "http://tieba.baidu.com/f/commit/share/fnameShareApi"
-        f"?ie=utf-8&fname={quote(name)}"
-    )
-    headers = get_headers()
-    headers.update({COOKIE: f"{BDUSS}={bduss}"})
     try:
-        resp = robust_request('GET', url, headers=headers, timeout=10)
-        resp.raise_for_status()
-        data = resp.json().get('data', {})
-        fid = data.get('fid')
+        fid = await client.get_fid(name)
         if not fid:
-            raise ValueError(f"接口返回 data 中缺少 fid：{data}")
+            raise ValueError(f"未获取到 fid：{name}")
         return str(fid)
     except Exception as e:
         logger.error(f"获取吧名 {kw!r} 的 fid 失败：%s", e)
         raise
 
 # -----------------------------
-# 主入口
+# 主入口（AIO）
 # -----------------------------
-def main():
+async def async_main():
     """
-    主函数：签到所有账号，条件触发吧主任务后进行回复/置顶
+    主函数：签到所有账号，条件触发吧主任务后进行回复/置顶（aio 版）
     """
     if 'BDUSS' not in ENV:
         logger.error("未配置 BDUSS，停止执行")
         return
 
+    # 新增：STOKEN（# 分隔），允许缺省或长度不一致
+    stokens_list = ENV.get(STOKEN_ENV, '')
+    stokens_list = stokens_list.split('#') if stokens_list else []
+
     # 新增：吧主任务执行间隔
     interval_days = int(ENV.get('MODERATOR_INTERVAL_DAYS', '10'))
     from pathlib import Path
-    import json
+    import json as _json
     last_file = Path('last_moderator_run.json')
     today_str = time.strftime('%Y-%m-%d')
     can_run_moderator = True
     if last_file.exists():
         try:
-            data = json.loads(last_file.read_text())
+            data = _json.loads(last_file.read_text())
             last_str = data.get('last_run', '')
             last_time = time.strptime(last_str, '%Y-%m-%d')
             last_ts = time.mktime(last_time)
@@ -922,40 +806,61 @@ def main():
     all_favorites = []
     total_sign_time = 0
     task_status = []
+
+    proxy_cfg = _build_aiotieba_proxy()
+
     for idx, bduss in enumerate(bds_list, start=1):
-        logger.info(f"开始第{idx}个用户签到")
+        stoken = stokens_list[idx-1] if idx-1 < len(stokens_list) else ''
+        masked_st = (stoken[:4] + '****') if stoken else '(空)'
+        logger.info(f"启动账号 {idx}: BDUSS=****, STOKEN={masked_st}, proxy={proxy_cfg}")
+
         start_time = time.time()
-        try:
-            tbs = get_tbs(bduss)
-        except Exception:
-            continue
-        favorites = get_favorite(bduss)
-        logger.info("账号%d关注贴吧数量: %d", idx, len(favorites))
-        all_favorites.append(favorites)
-        for f in favorites:
-            time.sleep(random.uniform(1, 3))
-            client_sign(bduss, tbs, f['id'], f['name'])
-        total_sign_time += int(time.time() - start_time)
-        if can_run_moderator and str(idx-1) == MODERATOR_BDUSS_INDEX and MODERATED_BARS and TARGET_POST_IDS:
-            bars = [b.strip() for b in MODERATED_BARS.split(',') if b.strip()]
-            posts = [p.strip() for p in TARGET_POST_IDS.split(',') if p.strip()]
-            seen = set()
-            for bar, pid in zip(bars, posts):
-                if bar in seen: continue
-                seen.add(bar)
-                logger.info(f"执行吧主任务:{bar}")
-                status = moderator_task(bduss, tbs, bar, pid)
-                task_status.append(status)
-                time.sleep(random.uniform(6, 12))
+
+        # 使用异步上下文管理器管理连接
+        async with aiotieba.Client(BDUSS=bduss, STOKEN=stoken, proxy=proxy_cfg) as client:
+            # 获取 tbs（占位）
+            _ = await get_tbs(bduss)
+
+            # 关注列表
+            favorites = await get_favorite(client)
+            logger.info("账号%d关注贴吧数量: %d", idx, len(favorites))
+            all_favorites.append(favorites)
+
+            # 签到
+            for f in favorites:
+                await asyncio.sleep(random.uniform(1, 3))
+                await client_sign(client, f['id'], f['name'])
+
+            total_sign_time += int(time.time() - start_time)
+
+            # 吧务任务
+            if can_run_moderator and str(idx-1) == MODERATOR_BDUSS_INDEX and MODERATED_BARS and TARGET_POST_IDS:
+                bars = [b.strip() for b in MODERATED_BARS.split(',') if b.strip()]
+                posts = [p.strip() for p in TARGET_POST_IDS.split(',') if p.strip()]
+                seen = set()
+                for bar, pid in zip(bars, posts):
+                    if bar in seen: 
+                        continue
+                    seen.add(bar)
+                    logger.info(f"执行吧主任务:{bar}")
+                    status = await moderator_task(client, bar, pid)
+                    task_status.append(status)
+                    await asyncio.sleep(random.uniform(6, 12))
+
     if can_run_moderator and task_status:
         try:
-            import json
-            Path('last_moderator_run.json').write_text(json.dumps({'last_run': today_str}))
+            from pathlib import Path as _Path
+            import json as _json2
+            _Path('last_moderator_run.json').write_text(_json2.dumps({'last_run': today_str}))
             logger.info(f"更新吧主任务上次运行时间: {today_str}")
         except Exception as e:
             logger.warning(f"更新 last_run 失败: {e}")
+
     send_email(all_favorites, total_sign_time, task_status)
     logger.info("所有用户签到结束")
+
+def main():
+    asyncio.run(async_main())
 
 if __name__ == '__main__':
     main()
