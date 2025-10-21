@@ -816,7 +816,7 @@ async def moderator_task(client: "aiotieba.Client", bar_name, post_id):
         logger.info(f"回复内容: {content}")
         try:
             # aiotieba 发帖（回帖）
-            add_res = await client.add_post(int(post_id), content)
+            add_res = await client.add_post(int(fid), int(post_id), content)
             if add_res.err:
                 # 未登录错误依旧不在这里报警（预检已做），仅记录
                 logger.error(f"回复失败: {add_res.err}")
@@ -827,7 +827,7 @@ async def moderator_task(client: "aiotieba.Client", bar_name, post_id):
                 # 删除回复
                 if DO_MODERATOR_DELETE and pid:
                     await rnd_sleep()
-                    del_res = await client.del_post(int(post_id), int(pid))
+                    del_res = await client.del_post(int(fid), int(post_id), int(pid))
                     if del_res.err:
                         logger.info(f"删除回复失败: {del_res.err}")
                     else:
