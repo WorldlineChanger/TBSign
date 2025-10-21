@@ -12,16 +12,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: 'Checkout codes'
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
       - name: 'Set python'
-        uses: actions/setup-python@v1
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
       - name: 'Install dependencies'
-        run: python -m pip install --upgrade requests && python -m pip install --upgrade PySocks
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --upgrade requests PySocks aiohttp aiotieba
       - name: 'Start Sign'
         env:
           BDUSS: ${{ secrets.BDUSS }}
+          STOKEN: ${{ secrets.STOKEN }}
+          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
           HOST: ${{ secrets.HOST }}
           FROM: ${{ secrets.FROM }}
           TO: ${{ secrets.TO }}
