@@ -486,7 +486,7 @@ import asyncio
 # 额外引入 aiohttp 用于异步预检与 PushPlus
 import aiohttp
 
-# —— 修复导入：新版在 aiotieba.config 下；旧版保留回退 —— 
+# —— 修复导入：新版在 aiotieba.config 下；旧版保留回退 ——
 try:
     import aiotieba
     try:
@@ -496,18 +496,6 @@ try:
 except Exception as _e:
     logger.error("未安装/版本不匹配的 aiotieba，请先 `pip install -U aiotieba`，错误: %s", _e)
     raise
-
-def _build_aiotieba_proxy():
-    """
-    将现有 SOCKS_PROXY / PROXY_ENABLE 映射到 aiotieba 的 ProxyConfig
-    """
-    if not PROXY_ENABLE:
-        return False
-    if SOCKS_PROXY:
-        # 直接指定代理URL（支持 socks5 / http 等）
-        return ProxyConfig(url=SOCKS_PROXY)
-    # 启用环境变量代理（与原逻辑兼容）
-    return True
 
 # -----------------------------
 # PushPlus 告警
@@ -625,39 +613,83 @@ def _is_permission_or_stoken_issue(err_obj) -> bool:
     return any(k in s for k in keys)
 
 # -----------------------------
-# 2. 获取关注的贴吧（AIO）
+# 2. 获取关注的贴吧
 # -----------------------------
-async def get_favorite(client: "aiotieba.Client"):
-    """获取用户关注的贴吧列表（稳健分页 + 扁平化 + 去重 + 字段规范化）（AIO）"""
+def get_favorite_fast(bduss: str):
+    """获取用户关注的贴吧列表（稳健分页 + 扁平化 + 去重 + 字段规范化）"""
     logger.info("获取关注的贴吧开始")
     collected = []
     seen = set()
+    page_no = 1
 
-    # aiotieba: get_self_follow_forums 支持自动分页
-    page = 1
+    def _normalize(item: dict):
+        if not isinstance(item, dict):
+            return None
+        fid = str(item.get('id') or item.get('fid') or item.get('forum_id') or '').strip()
+        name = item.get('name') or item.get('fname') or item.get('forum_name')
+        if not fid or not name:
+            return None
+        obj = dict(item)
+        obj['id'] = fid
+        obj['name'] = str(name)
+        return obj
+
+    def _add(item):
+        obj = _normalize(item)
+        if not obj:
+            return
+        fid = obj['id']
+        if fid in seen:
+            return
+        seen.add(fid)
+        collected.append(obj)
+
     while True:
-        res = await client.get_self_follow_forums()
-        if res.err:
-            # 登录态兜底：把“未登录/需登录”视为 BDUSS 失效，抛给上层处理
-            if _is_not_logged_in_err(res.err):
-                raise RuntimeError(f"NOT_LOGGED_IN: {res.err}")
-            logger.error("获取关注的贴吧出错: %s", res.err)
+        data = {
+            'BDUSS': bduss,
+            '_client_type': '2',
+            '_client_id': DEVICE['client_id'],
+            '_client_version': SIGN_DATA['_client_version'],
+            '_phone_imei': DEVICE['imei'],
+            'cuid': DEVICE['cuid'],
+            'from': '1008621y',
+            'page_no': str(page_no),
+            'page_size': '200',
+            'model': DEVICE['model'],
+            'net_type': '1',
+            'timestamp': str(int(time.time())),
+            'vcode_tag': '11',
+        }
+        data = encodeData(data)
+        try:
+            resp = robust_request('POST', LIKIE_URL, data=data, timeout=10)
+            resp.raise_for_status()
+            res = resp.json()
+        except Exception as e:
+            logger.error("获取关注的贴吧出错: %s", e)
             break
-        for it in res.objs:
-            fid = str(it.fid)
-            if fid in seen:
-                continue
-            seen.add(fid)
-            collected.append({
-                'id': fid,
-                'name': it.fname,
-                'slogan': '无',  # SelfFollowForum 不含简介字段，沿用原邮件结构
-            })
-        logger.info(f"第{page}页累计收集 {len(collected)} 个")
-        if not res.has_more:
+
+        flist = res.get('forum_list', {})
+        if not isinstance(flist, dict):
+            flist = {}
+        for section in ('non-gconforum', 'gconforum'):
+            v = flist.get(section, [])
+            if isinstance(v, list):
+                for item in v:
+                    if isinstance(item, list):
+                        for sub in item:
+                            _add(sub)
+                    else:
+                        _add(item)
+            elif isinstance(v, dict):
+                _add(v)
+
+        logger.info(f"第{page_no}页累计收集 {len(collected)} 个")
+        has_more = (str(res.get('has_more', '0')) == '1')
+        if not has_more:
             break
-        page += 1
-        await asyncio.sleep(0.2)
+        page_no += 1
+        time.sleep(0.2)
 
     logger.info("获取关注的贴吧结束，共 %d 个", len(collected))
     return collected
@@ -893,6 +925,18 @@ async def get_fid_by_name(client: "aiotieba.Client", kw):
 # -----------------------------
 # 主入口（AIO）
 # -----------------------------
+def _build_aiotieba_proxy():
+    """
+    将现有 SOCKS_PROXY / PROXY_ENABLE 映射到 aiotieba 的 ProxyConfig
+    """
+    if not PROXY_ENABLE:
+        return False
+    if SOCKS_PROXY:
+        # 直接指定代理URL（支持 socks5 / http 等）
+        return ProxyConfig(url=SOCKS_PROXY)
+    # 启用环境变量代理
+    return True
+
 async def async_main():
     """
     主函数：签到所有账号，条件触发吧主任务后进行回复/置顶（aio 版）
@@ -936,9 +980,13 @@ async def async_main():
 
     for idx, bduss in enumerate(bds_list, start=1):
         stoken = stokens_list[idx-1] if idx-1 < len(stokens_list) else ''
-        masked_bduss = _mask_token_tail(bduss)
-
-        logger.info(f"启动账号 {idx}: BDUSS=****, STOKEN={_mask_token_tail(stoken)}, proxy={proxy_cfg}")
+        # 代理信息脱敏展示
+        safe_stoken = "****" if stoken else "(空)"
+        if PROXY_ENABLE:
+            safe_proxy_str = proxy_manager._sanitize_proxy_url(SOCKS_PROXY) if SOCKS_PROXY else "环境变量代理"
+        else:
+            safe_proxy_str = "未启用"
+        logger.info(f"启动账号 {idx}: BDUSS=****, STOKEN={safe_stoken}, proxy={safe_proxy_str}")
 
         # -------- 预检登录态（仅依赖 BDUSS，STOKEN 可为空） --------
         ok, detail = await check_bduss_login_state(bduss, stoken)
@@ -946,7 +994,7 @@ async def async_main():
             if idx not in bduss_alerted:
                 notify_bduss_invalid_via_pushplus(
                     index=idx,
-                    masked_id=masked_bduss,
+                    masked_id="****",
                     reason="预检未登录（疑似 BDUSS 失效）",
                     detail=detail
                 )
@@ -967,22 +1015,22 @@ async def async_main():
 
             # 关注列表
             try:
-                favorites = await get_favorite(client)
+                favorites = get_favorite_fast(bduss)
             except RuntimeError as e:
-                if str(e).startswith("NOT_LOGGED_IN"):
-                    if idx not in bduss_alerted:
-                        notify_bduss_invalid_via_pushplus(
-                            index=idx,
-                            masked_id=masked_bduss,
-                            reason="运行中检测到未登录（疑似 BDUSS 失效）",
-                            detail=str(e)
-                        )
-                        bduss_alerted.add(idx)
-                    logger.warning(f"账号#{idx} 运行中未登录，跳过该账号")
-                    continue
-                else:
-                    logger.error(f"账号#{idx} 获取关注吧单异常：{e}")
-                    favorites = []
+                if idx not in bduss_alerted:
+                    notify_bduss_invalid_via_pushplus(
+                        index=idx,
+                        masked_id="****",
+                        reason="运行中检测到未登录（疑似 BDUSS 失效）",
+                        detail=str(e)
+                    )
+                    bduss_alerted.add(idx)
+                logger.warning(f"账号#{idx} 运行中未登录，跳过该账号")
+                continue
+            except Exception as e:
+                logger.error(f"账号#{idx} 获取关注吧单异常：{e}")
+                favorites = []
+
             logger.info("账号%d关注贴吧数量: %d", idx, len(favorites))
             all_favorites.append(favorites)
 
