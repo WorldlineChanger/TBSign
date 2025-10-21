@@ -486,7 +486,7 @@ import asyncio
 # 额外引入 aiohttp 用于异步预检与 PushPlus
 import aiohttp
 
-# —— 修复导入：新版在 aiotieba.config 下；旧版保留回退 ——
+# 修复导入：新版在 aiotieba.config 下；旧版保留回退 
 try:
     import aiotieba
     try:
@@ -723,9 +723,9 @@ def _is_already_signed_err(err_obj) -> bool:
     return False
 
 async def client_sign(client: "aiotieba.Client", fid, kw, bduss: str, stoken: str):
-    """执行签到操作（AIO）——含首选代理一次 + 代理链重试"""
+    """执行签到操作（AIO）首选代理-免费代理-直连 三段式重试"""
     logger.info(f"签到贴吧: {kw}")
-    # 先用现有 client（首选代理/环境代理）尝试一次
+    # 先用现有 client（首选代理/环境代理）
     try:
         r = await client.sign_forum(kw)
         if not getattr(r, "err", None):
@@ -738,23 +738,33 @@ async def client_sign(client: "aiotieba.Client", fid, kw, bduss: str, stoken: st
     except Exception as e:
         logger.warning("签到异常(默认代理抛异常): %s", e)
 
-    # 若失败：恢复“代理 -> 免费代理 -> 直连”的健壮重试链
-    max_retries = 3
-    proxy_list = proxy_manager.get_proxy_list()
-    for attempt in range(1, max_retries):
-        proxy_index = min(attempt, len(proxy_list) - 1)
-        current_proxy = proxy_list[proxy_index]
-        proxy_info_for_log = proxy_manager._sanitize_proxy_url(current_proxy)
-        logger.info(f"请求尝试 ({attempt+1}/{max_retries}) 使用: {proxy_info_for_log}")
+    # 组装固定两步链，确保最后一步一定直连
+    # 从 ProxyManager 取免费代理（与自定义不同且非 None）
+    backup_proxy = None
+    proxy_list_full = proxy_manager.get_proxy_list()  # [user_proxy?, backup..., None]
+    for p in proxy_list_full:
+        if p and p != SOCKS_PROXY:  # 选择第一条免费代理
+            backup_proxy = p
+            break
+    fallback_chain = []
+    if backup_proxy:
+        fallback_chain.append(backup_proxy)
+    fallback_chain.append(None)  # 最后一跳强制直连
+
+    total_steps = 1 + len(fallback_chain)  # 含最初默认尝试
+    # 执行 fallback，两步最多
+    for step_idx, p in enumerate(fallback_chain, start=2):  # 日志编号与旧版一致：2/3、3/3
+        proxy_info_for_log = proxy_manager._sanitize_proxy_url(p)
+        logger.info(f"请求尝试 ({step_idx}/{total_steps}) 使用: {proxy_info_for_log}")
         try:
-            proxy_param = ProxyConfig(url=current_proxy) if current_proxy else False
+            proxy_param = ProxyConfig(url=p) if p else False
             async with aiotieba.Client(BDUSS=bduss, STOKEN=stoken, proxy=proxy_param) as tmp_client:
                 r2 = await tmp_client.sign_forum(kw)
             if not getattr(r2, "err", None):
-                proxy_manager.test_and_log_success(current_proxy)
+                proxy_manager.test_and_log_success(p)
                 return {'error_code': 0, 'data': {'raw': 'ok'}}
             if _is_already_signed_err(r2.err):
-                proxy_manager.test_and_log_success(current_proxy)
+                proxy_manager.test_and_log_success(p)
                 return {'error_code': 0, 'data': {'raw': 'already signed'}}
             logger.warning(f"签到失败: {r2.err}")
         except Exception as e2:
