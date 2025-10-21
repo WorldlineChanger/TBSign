@@ -697,15 +697,46 @@ def get_favorite_fast(bduss: str):
 # -----------------------------
 # 3. 客户端签到（AIO）
 # -----------------------------
-async def client_sign(client: "aiotieba.Client", fid, kw, bduss: str, stoken: str):  # 新增 bduss, stoken 参数
-    """执行签到操作（AIO）"""
+def _is_already_signed_err(err_obj) -> bool:
+    """判断是否为'已签到'错误，避免无谓重试"""
+    if not err_obj:
+        return False
+    # 形态1：元组/列表 (160002, '亲，你之前已经签过了')
+    if isinstance(err_obj, (tuple, list)) and err_obj:
+        code = err_obj[0]
+        try:
+            code_int = int(str(code))
+            if code_int == 160002:
+                return True
+        except Exception:
+            pass
+        # 文案兜底
+        msg = " ".join(map(str, err_obj)).lower()
+        if "已经签" in msg or "already" in msg or "signed" in msg:
+            return True
+    # 形态2：字符串
+    s = str(err_obj)
+    if "160002" in s:
+        return True
+    if "已经签" in s or "already" in s or "signed" in s:
+        return True
+    return False
+
+async def client_sign(client: "aiotieba.Client", fid, kw, bduss: str, stoken: str):
+    """执行签到操作（AIO）——含首选代理一次 + 代理链重试"""
     logger.info(f"签到贴吧: {kw}")
     # 先用现有 client（首选代理/环境代理）尝试一次
     try:
         r = await client.sign_forum(kw)
-        return {'error_code': 0 if not r.err else -1, 'data': {'raw': str(r.err) if r.err else 'ok'}}
+        if not getattr(r, "err", None):
+            return {'error_code': 0, 'data': {'raw': 'ok'}}
+        # 有错误但不是异常：判断是否为已签到；是则直接视为成功并不重试
+        if _is_already_signed_err(r.err):
+            return {'error_code': 0, 'data': {'raw': 'already signed'}}
+        # 其它错误才进入重试链
+        logger.warning(f"签到异常(默认代理返回错误): {r.err}")
     except Exception as e:
-        logger.warning("签到异常(默认代理): %s", e)
+        logger.warning("签到异常(默认代理抛异常): %s", e)
 
     # 若失败：恢复“代理 -> 免费代理 -> 直连”的健壮重试链
     max_retries = 3
@@ -718,12 +749,14 @@ async def client_sign(client: "aiotieba.Client", fid, kw, bduss: str, stoken: st
         try:
             proxy_param = ProxyConfig(url=current_proxy) if current_proxy else False
             async with aiotieba.Client(BDUSS=bduss, STOKEN=stoken, proxy=proxy_param) as tmp_client:
-                r = await tmp_client.sign_forum(kw)
-            if not r.err:
+                r2 = await tmp_client.sign_forum(kw)
+            if not getattr(r2, "err", None):
                 proxy_manager.test_and_log_success(current_proxy)
                 return {'error_code': 0, 'data': {'raw': 'ok'}}
-            else:
-                logger.warning(f"签到失败: {r.err}")
+            if _is_already_signed_err(r2.err):
+                proxy_manager.test_and_log_success(current_proxy)
+                return {'error_code': 0, 'data': {'raw': 'already signed'}}
+            logger.warning(f"签到失败: {r2.err}")
         except Exception as e2:
             logger.warning(f"请求失败: {e2}")
         await asyncio.sleep(random.uniform(1, 2))
