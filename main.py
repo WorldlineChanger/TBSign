@@ -482,15 +482,20 @@ def encodeData(data):
 #  Tieba 交互全面切到 aio（aiotieba）
 # =============================
 import asyncio
-try:
-    import aiotieba
-    from aiotieba import ProxyConfig, TimeoutConfig
-except Exception as _e:
-    logger.error("未安装 aiotieba，请先 `pip install aiotieba`，错误: %s", _e)
-    raise
 
 # 额外引入 aiohttp 用于异步预检与 PushPlus
 import aiohttp
+
+# —— 修复导入：新版在 aiotieba.config 下；旧版保留回退 —— 
+try:
+    import aiotieba
+    try:
+        from aiotieba.config import ProxyConfig, TimeoutConfig  # aiotieba 4.x
+    except ImportError:
+        from aiotieba import ProxyConfig, TimeoutConfig         # 旧版兼容
+except Exception as _e:
+    logger.error("未安装/版本不匹配的 aiotieba，请先 `pip install -U aiotieba`，错误: %s", _e)
+    raise
 
 def _build_aiotieba_proxy():
     """
