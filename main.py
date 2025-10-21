@@ -197,6 +197,8 @@ SOCKS_PROXY             = ENV.get('SOCKS_PROXY', '')  # 首选代理
 COOKIE       = "Cookie"
 BDUSS        = "BDUSS"
 STOKEN_ENV   = "STOKEN"
+PUSHPLUS_ENV = "PUSHPLUS_TOKEN"
+
 SIGN_KEY     = 'tiebaclient!!!'
 UTF8         = "utf-8"
 
@@ -487,6 +489,9 @@ except Exception as _e:
     logger.error("未安装 aiotieba，请先 `pip install aiotieba`，错误: %s", _e)
     raise
 
+# 额外引入 aiohttp 用于异步预检与 PushPlus
+import aiohttp
+
 def _build_aiotieba_proxy():
     """
     将现有 SOCKS_PROXY / PROXY_ENABLE 映射到 aiotieba 的 ProxyConfig
@@ -500,6 +505,93 @@ def _build_aiotieba_proxy():
     return True
 
 # -----------------------------
+# PushPlus 告警
+# -----------------------------
+def _mask_token_tail(s: str, head: int = 4, tail: int = 4) -> str:
+    if not s:
+        return "(空)"
+    if len(s) <= head + tail:
+        return s[0] + "***"
+    return f"{s[:head]}****{s[-tail:]}"
+
+def notify_bduss_invalid_via_pushplus(index: int, masked_id: str, reason: str, detail: str):
+    """
+    通过 PushPlus 发送 BDUSS 失效告警（无 token 时静默跳过，不抛异常）
+    """
+    token = ENV.get(PUSHPLUS_ENV, "").strip()
+    if not token:
+        logger.info("未配置 PUSHPLUS_TOKEN，跳过 BDUSS 失效推送")
+        return
+
+    title = f"[Tieba Action] BDUSS 失效告警（账号#{index}）"
+    ts = datetime.now(CN_TZ).strftime('%Y-%m-%d %H:%M:%S %z')
+    html = (
+        f"<b>账号</b>：#{index}<br>"
+        f"<b>BDUSS</b>：{masked_id}<br>"
+        f"<b>判定</b>：{reason}<br>"
+        f"<b>摘要</b>：{detail}<br>"
+        f"<b>时间</b>：{ts}<br>"
+        f"<b>建议</b>：请尽快在 Actions Secret 中更新 BDUSS"
+    )
+    payload = {
+        "token": token,
+        "title": title,
+        "content": html,
+        "template": "html"
+    }
+
+    urls = ["https://www.pushplus.plus/send", "https://pushplus.plus/send"]
+    ok = False
+    for u in urls:
+        try:
+            r = requests.post(u, json=payload, timeout=10)
+            if r.status_code == 200:
+                ok = True
+                break
+        except Exception as e:
+            logger.warning(f"PushPlus 发送失败({u}): {e}")
+    if ok:
+        logger.info(f"已通过 PushPlus 发送 BDUSS 失效告警：账号#{index}")
+    else:
+        logger.warning("PushPlus 发送未成功（所有域名均失败）")
+
+# -----------------------------
+# 登录态预检（仅依赖 BDUSS，STOKEN 可为空）
+# -----------------------------
+async def check_bduss_login_state(bduss: str, stoken: str = ""):
+    """
+    返回 (True/False/None, detail)
+      True  -> 已登录
+      False -> 未登录（可视为 BDUSS 失效）
+      None  -> 网络异常/不确定
+    """
+    url = TBS_URL  # http://tieba.baidu.com/dc/common/tbs
+    cookies = f"BDUSS={bduss}"
+    if stoken:
+        cookies += f"; STOKEN={stoken}"
+
+    headers = {
+        "User-Agent": random.choice(USER_AGENTS_DESKTOP),
+        "Accept": "application/json, text/plain, */*",
+        "Cookie": cookies
+    }
+
+    try:
+        timeout = aiohttp.ClientTimeout(total=8)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url, headers=headers) as resp:
+                if resp.status != 200:
+                    return None, f"http {resp.status}"
+                data = await resp.json(content_type=None)
+                # 典型返回：{"is_login":1,"tbs":"xxx"}
+                is_login = int(data.get("is_login", 0))
+                if is_login == 1:
+                    return True, "is_login=1"
+                return False, f"is_login={is_login}"
+    except Exception as e:
+        return None, f"network:{e}"
+
+# -----------------------------
 # 1. 获取 tbs（由 aiotieba 内部维护，保持壳与日志）
 # -----------------------------
 async def get_tbs(bduss: str):
@@ -509,6 +601,23 @@ async def get_tbs(bduss: str):
     tbs = "aiotieba_managed"
     logger.info(f"获取 tbs 完成: {tbs}")
     return tbs
+
+# -----------------------------
+# 错误语义判别（最小关键字法，避免把权限问题误判未登录）
+# -----------------------------
+def _is_not_logged_in_err(err_obj) -> bool:
+    if not err_obj:
+        return False
+    s = str(err_obj).lower()
+    keywords = ["not login", "not logged", "unlogin", "未登录", "need login", "requires login", "请先登录"]
+    return any(k in s for k in keywords)
+
+def _is_permission_or_stoken_issue(err_obj) -> bool:
+    if not err_obj:
+        return False
+    s = str(err_obj).lower()
+    keys = ["no permission", "forbidden", "权限", "stoken", "insufficient"]
+    return any(k in s for k in keys)
 
 # -----------------------------
 # 2. 获取关注的贴吧（AIO）
@@ -522,8 +631,11 @@ async def get_favorite(client: "aiotieba.Client"):
     # aiotieba: get_self_follow_forums 支持自动分页
     page = 1
     while True:
-        res = await client.get_self_follow_forums()  # 一次取一页，库内部已封装
+        res = await client.get_self_follow_forums()
         if res.err:
+            # 登录态兜底：把“未登录/需登录”视为 BDUSS 失效，抛给上层处理
+            if _is_not_logged_in_err(res.err):
+                raise RuntimeError(f"NOT_LOGGED_IN: {res.err}")
             logger.error("获取关注的贴吧出错: %s", res.err)
             break
         for it in res.objs:
@@ -554,7 +666,6 @@ async def client_sign(client: "aiotieba.Client", fid, kw):
     try:
         # aiotieba 自动处理 tbs/sign 等
         r = await client.sign_forum(kw)
-        # 返回与原来兼容的结构（尽量）
         return {'error_code': 0 if not r.err else -1, 'data': {'raw': str(r.err) if r.err else 'ok'}}
     except Exception as e:
         logger.warning("签到异常: %s", e)
@@ -602,6 +713,7 @@ async def moderator_task(client: "aiotieba.Client", bar_name, post_id):
             # aiotieba 发帖（回帖）
             add_res = await client.add_post(int(post_id), content)
             if add_res.err:
+                # 未登录错误依旧不在这里报警（预检已做），仅记录
                 logger.error(f"回复失败: {add_res.err}")
             else:
                 success['reply'] = True
@@ -629,14 +741,20 @@ async def moderator_task(client: "aiotieba.Client", bar_name, post_id):
             # aiotieba 的 top / untop，一般需要 STOKEN；无 STOKEN 时返回权限相关错误
             top_res = await client.top(bar_name.rstrip("吧"), int(post_id))
             if top_res.err:
-                logger.warning(f"置顶失败: {top_res.err}（可能需要 STOKEN）")
+                if _is_permission_or_stoken_issue(top_res.err):
+                    logger.warning(f"置顶失败（权限/STOKEN 可能不足）：{top_res.err}")
+                else:
+                    logger.warning(f"置顶失败：{top_res.err}")
             else:
                 success['top'] = True
                 logger.info("置顶成功")
             await rnd_sleep()
             untop_res = await client.untop(bar_name.rstrip("吧"), int(post_id))
             if untop_res.err:
-                logger.warning(f"取消置顶失败: {untop_res.err}（可能需要 STOKEN）")
+                if _is_permission_or_stoken_issue(untop_res.err):
+                    logger.warning(f"取消置顶失败（权限/STOKEN 可能不足）：{untop_res.err}")
+                else:
+                    logger.warning(f"取消置顶失败：{untop_res.err}")
             else:
                 logger.info("取消置顶成功")
         except Exception as e:
@@ -808,11 +926,32 @@ async def async_main():
     task_status = []
 
     proxy_cfg = _build_aiotieba_proxy()
+    # 本次运行已告警的账号，避免重复推送
+    bduss_alerted = set()
 
     for idx, bduss in enumerate(bds_list, start=1):
         stoken = stokens_list[idx-1] if idx-1 < len(stokens_list) else ''
-        masked_st = (stoken[:4] + '****') if stoken else '(空)'
-        logger.info(f"启动账号 {idx}: BDUSS=****, STOKEN={masked_st}, proxy={proxy_cfg}")
+        masked_bduss = _mask_token_tail(bduss)
+
+        logger.info(f"启动账号 {idx}: BDUSS=****, STOKEN={_mask_token_tail(stoken)}, proxy={proxy_cfg}")
+
+        # -------- 预检登录态（仅依赖 BDUSS，STOKEN 可为空） --------
+        ok, detail = await check_bduss_login_state(bduss, stoken)
+        if ok is False:
+            if idx not in bduss_alerted:
+                notify_bduss_invalid_via_pushplus(
+                    index=idx,
+                    masked_id=masked_bduss,
+                    reason="预检未登录（疑似 BDUSS 失效）",
+                    detail=detail
+                )
+                bduss_alerted.add(idx)
+            logger.warning(f"账号#{idx} 预检未登录，跳过该账号")
+            continue
+        elif ok is None:
+            logger.warning(f"账号#{idx} 预检网络异常：{detail}（继续尝试执行任务）")
+        else:
+            logger.info(f"账号#{idx} 预检登录正常：{detail}")
 
         start_time = time.time()
 
@@ -822,7 +961,23 @@ async def async_main():
             _ = await get_tbs(bduss)
 
             # 关注列表
-            favorites = await get_favorite(client)
+            try:
+                favorites = await get_favorite(client)
+            except RuntimeError as e:
+                if str(e).startswith("NOT_LOGGED_IN"):
+                    if idx not in bduss_alerted:
+                        notify_bduss_invalid_via_pushplus(
+                            index=idx,
+                            masked_id=masked_bduss,
+                            reason="运行中检测到未登录（疑似 BDUSS 失效）",
+                            detail=str(e)
+                        )
+                        bduss_alerted.add(idx)
+                    logger.warning(f"账号#{idx} 运行中未登录，跳过该账号")
+                    continue
+                else:
+                    logger.error(f"账号#{idx} 获取关注吧单异常：{e}")
+                    favorites = []
             logger.info("账号%d关注贴吧数量: %d", idx, len(favorites))
             all_favorites.append(favorites)
 
