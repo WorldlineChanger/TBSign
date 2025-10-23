@@ -238,13 +238,13 @@ class ProxyManager:
             # 隐藏IP地址，只保留第一段
             sanitized_url = re.sub(r'(\d{1,3})\.\d{1,3}\.\d{1,3}\.\d{1,3}', r'\1.***.***.***', url)
             
-            # 隐藏密码
+            # 隐藏用户名密码
             if '@' in sanitized_url and '//' in sanitized_url:
                 protocol, rest = sanitized_url.split('//', 1)
                 creds, host_info = rest.split('@', 1)
                 if ':' in creds:
                     user, _ = creds.split(':', 1)
-                    return f"{protocol}//{user}:***@{host_info}"
+                    return f"{protocol}//***:***@{host_info}"
                 else: # 兼容无密码格式 user@host
                     return f"{protocol}//***@{host_info}"
             return sanitized_url
@@ -451,7 +451,8 @@ def build_reply_content():
     now_str = datetime.now(CN_TZ).strftime('%Y年%m月%d日 %H时%M分%S秒')
     first_line = f"世界线 - {now_str} #(滑稽)"
 
-    noise = ''.join(random.choice(NOISE_CHARS) for _ in range(random.randint(1,3)))
+    # noise = ''.join(random.choice(NOISE_CHARS) for _ in range(random.randint(1,3)))
+    noise = ''
     sci_phrase = random.choice(SCI_FI_PHRASES)
     rand_token = uuid.uuid4().hex[:6]
     second_line = f"{noise}{sci_phrase}-{rand_token}"
@@ -464,6 +465,51 @@ def build_reply_content():
         quote_block = ''
 
     return f"{first_line}\n{second_line}{quote_block}"
+
+# ====== 异步版一言与内容生成（避免阻塞事件循环） ======
+import asyncio
+import aiohttp
+
+async def get_hitokoto_async():
+    """异步调用一言 API（与同步版同逻辑，不阻塞事件循环）"""
+    timeout = aiohttp.ClientTimeout(total=5)
+    headers = {'User-Agent': random.choice(USER_AGENTS_DESKTOP)}
+    for attempt in range(3):
+        for url in HITOKOTO_URLS:
+            try:
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.get(url, headers=headers) as resp:
+                        if resp.status == 200:
+                            data = await resp.json(content_type=None)
+                            qt  = (data.get('hitokoto') or '').strip()
+                            frm = (data.get('from') or '').strip()
+                            who = (data.get('from_who') or '').strip()
+                            if qt:
+                                if frm and who:
+                                    return f"{qt}\n——{frm} · {who}"
+                                elif frm:
+                                    return f"{qt}\n——{frm}"
+                                else:
+                                    return qt
+            except Exception:
+                pass
+        if attempt < 2:
+            await asyncio.sleep(random.uniform(1, 2))
+    return ''
+
+async def build_reply_content_async():
+    """异步生成随机化回复内容（结构与同步版保持一致）"""
+    now_str = datetime.now(CN_TZ).strftime('%Y年%m月%d日 %H时%M分%S秒')
+    first_line = f"世界线 - {now_str} #(滑稽)"
+    # noise = ''.join(random.choice(NOISE_CHARS) for _ in range(random.randint(1,3)))
+    noise = ''
+    sci_phrase = random.choice(SCI_FI_PHRASES)
+    rand_token = uuid.uuid4().hex[:6]
+    second_line = f"{noise}{sci_phrase}-{rand_token}"
+    quote = await get_hitokoto_async()
+    quote_block = f"\n/>\n{quote}" if quote else ''
+    return f"{first_line}\n{second_line}{quote_block}"
+# ====== 新增结束 ======
 
 # -----------------------------
 # 请求参数签名
@@ -481,10 +527,8 @@ def encodeData(data):
 # =============================
 #  Tieba 交互全面切到 aio（aiotieba）
 # =============================
-import asyncio
-
 # 额外引入 aiohttp 用于异步预检与 PushPlus
-import aiohttp
+#（已在上方导入）
 
 # 修复导入：新版在 aiotieba.config 下；旧版保留回退 
 try:
@@ -790,7 +834,7 @@ async def simulate_view_post(client: "aiotieba.Client", fid, tid):
         logger.warning(f"模拟浏览失败: {e}")
         return False
 
-async def moderator_task(client: "aiotieba.Client", bar_name, post_id):
+async def moderator_task(client: "aiotieba.Client", bar_name, post_id, bduss, stoken, proxy_cfg):
     """执行吧主考核任务，采用防检测措施（AIO）"""
     success = {'reply': False, 'top': False}
     if not DO_MODERATOR_TASK:
@@ -810,17 +854,34 @@ async def moderator_task(client: "aiotieba.Client", bar_name, post_id):
     await simulate_view_post(client, fid, int(post_id))
     await rnd_sleep()
 
-    # 2. 回复 & 删除
+    # 2. 回复 & 删除（失败重建 Client + 直连兜底）
     if DO_MODERATOR_POST:
-        content = build_reply_content()
+        content = await build_reply_content_async()
         logger.info(f"回复内容: {content}")
         try:
-            # aiotieba 发帖（回帖）
+            # 第一次尝试（使用当前 client）
             add_res = await client.add_post(int(fid), int(post_id), content)
             if add_res.err:
-                # 未登录错误依旧不在这里报警（预检已做），仅记录
+                err_s = str(add_res.err)
                 logger.error(f"回复失败: {add_res.err}")
-            else:
+
+                # 特征错误：写入请求体失败 -> 重建 client 再试
+                if ("Can not write request body" in err_s) or ("Cannot write request body" in err_s):
+                    await rnd_sleep()
+                    # 2.1 重建一次相同代理的新连接
+                    logger.info("检测到写入请求体失败，重建连接后重试一次（同代理）")
+                    async with aiotieba.Client(BDUSS=bduss, STOKEN=stoken, proxy=proxy_cfg) as c2:
+                        add_res = await c2.add_post(int(fid), int(post_id), content)
+
+                    # 仍失败且是相同错误 -> 直连兜底
+                    if add_res.err and (("Can not write request body" in str(add_res.err)) or ("Cannot write request body" in str(add_res.err))):
+                        await rnd_sleep()
+                        logger.info("重建连接后仍失败，启用直连兜底再试一次")
+                        async with aiotieba.Client(BDUSS=bduss, STOKEN=stoken, proxy=False) as c3:
+                            add_res = await c3.add_post(int(fid), int(post_id), content)
+
+            # 成功路径
+            if not add_res.err:
                 success['reply'] = True
                 pid = getattr(add_res, "pid", None)
                 logger.info(f"回复成功 pid={pid}")
@@ -834,6 +895,9 @@ async def moderator_task(client: "aiotieba.Client", bar_name, post_id):
                         logger.info("删除回复成功")
                 else:
                     logger.info("删除操作已关闭或 pid 缺失")
+            else:
+                logger.error(f"回复最终失败: {add_res.err}")
+
         except Exception as e:
             logger.error(f"回复/删除阶段失败: {e}")
     else:
@@ -1123,7 +1187,7 @@ async def async_main():
                         continue
                     seen.add(bar)
                     logger.info(f"执行吧主任务:{bar}")
-                    status = await moderator_task(client, bar, pid)
+                    status = await moderator_task(client, bar, pid, bduss, stoken, proxy_cfg)
                     task_status.append(status)
                     await asyncio.sleep(random.uniform(6, 12))
 
