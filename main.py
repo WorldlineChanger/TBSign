@@ -805,11 +805,57 @@ def client_sign(bduss, tbs, fid, kw):
                 proxy_manager.test_and_log_success(p)
                 try:
                     jr = resp.json()
+
+                    # 统一状态判定 + 关键字段 + 原始返回 ===
+                    code = str(jr.get('error_code', ''))
+                    msg = jr.get('error_msg') or jr.get('msg') or ''
+
+                    # 三种成功判定：有 user_info；error_code 为 0；或“已签到”视作软成功
+                    has_ui = isinstance(jr.get('user_info'), dict)
+                    already = code in ('160002', '1101')  # 客户端/网页两种
+                    ok = has_ui or code in ('0', 0) or already
+
+                    # 补充 user_info 里的关键信息
+                    ui = jr.get('user_info') or {}
+                    rank = ui.get('user_sign_rank') or ui.get('sign_rank')
+                    cont = ui.get('cont_sign_num')
+                    cont_total = ui.get('cont_total_sign_num')
+                    sign_time = ui.get('sign_time')
+
+                    status = "Succeeded" if ok else "Failed" 
+                    logger.info(f"[sign_forum] {status}. args=({kw!r},) kwargs={{}} code={code} msg={msg}")
+
+                    # 进一步给出成功细节
+                    if has_ui:
+                        logger.info(
+                            f"[sign_forum] Details: rank={rank}, cont={cont}, total_cont={cont_total}, time={sign_time}"
+                        )
+
+                    # 常见错误码的可读提示
+                    if not ok and code in ('1102', '1107', '340006'):
+                        tips = {
+                            '1102': '未开通签到或过快',
+                            '1107': '今日已签到数量达上限(100)',
+                            '340006': '贴吧目录异常'
+                        }
+                        logger.warning(f"[sign_forum] Hint: {tips.get(code, '')}")
+
+                    # 保留一行原始返回
+                    logger.info(
+                        f"[sign_forum] Raw: {json.dumps(jr, ensure_ascii=False, separators=(',', ':'))}"
+                    )
+
                 except JSONDecodeError:
+                    # 非 JSON 返回时也记录原始文本（截断）
+                    logger.info(
+                        f"[sign_forum] 非JSON返回，视为成功。args=({kw!r},) kwargs={{}} raw={resp.text[:200]!r}"
+                    )
                     return {'error_code': 0}
+
                 if check_wind_control(jr):
                     return jr
                 return jr
+
             except requests.exceptions.RequestException as e:
                 logger.warning(f"签到请求失败(第{inner_try}/3): {e}")
                 if inner_try < 3:
