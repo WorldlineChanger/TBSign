@@ -185,11 +185,12 @@ DO_MODERATOR_TASK   = ENV.get('MODERATOR_TASK_ENABLE'  ,'false').lower() == 'tru
 DO_MODERATOR_POST   = ENV.get('MODERATOR_POST_ENABLE'  ,'false').lower() == 'true'
 DO_MODERATOR_TOP    = ENV.get('MODERATOR_TOP_ENABLE'   ,'false').lower() == 'true'
 DO_MODERATOR_DELETE = ENV.get('MODERATOR_DELETE_ENABLE','false').lower() == 'true'  # 是否删除回复
+LOG_SIGN_RAW        = os.environ.get('LOG_SIGN_RAW', 'false').lower() == 'true'     # 是否显示签到 Raw 信息
 MODERATOR_BDUSS_INDEX   = ENV.get('MODERATOR_BDUSS_INDEX', '0')
 MODERATED_BARS          = ENV.get('MODERATED_BARS', '')
 TARGET_POST_IDS         = ENV.get('TARGET_POST_IDS', '')
-PROXY_ENABLE            = ENV.get('PROXY_ENABLE', 'false').lower() == 'true'  # 是否使用代理
-SOCKS_PROXY             = ENV.get('SOCKS_PROXY', '')  # 首选代理
+PROXY_ENABLE            = ENV.get('PROXY_ENABLE', 'false').lower() == 'true'        # 是否使用代理
+SOCKS_PROXY             = ENV.get('SOCKS_PROXY', '')                                # 首选代理
 
 # -----------------------------
 # 请求签名 & 常量
@@ -806,7 +807,7 @@ def client_sign(bduss, tbs, fid, kw):
                 try:
                     jr = resp.json()
 
-                    # 统一状态判定 + 关键字段 + 原始返回 ===
+                    # 统一状态判定 + 关键字段
                     code = str(jr.get('error_code', ''))
                     msg = jr.get('error_msg') or jr.get('msg') or ''
 
@@ -840,16 +841,22 @@ def client_sign(bduss, tbs, fid, kw):
                         }
                         logger.warning(f"[sign_forum] Hint: {tips.get(code, '')}")
 
-                    # 保留一行原始返回
-                    logger.info(
-                        f"[sign_forum] Raw: {json.dumps(jr, ensure_ascii=False, separators=(',', ':'))}"
-                    )
+                    # 原始返回：仅在开关开启时打印
+                    if LOG_SIGN_RAW:
+                        logger.info(
+                            f"[sign_forum] Raw: {json.dumps(jr, ensure_ascii=False, separators=(',', ':'))}"
+                        )
 
                 except JSONDecodeError:
-                    # 非 JSON 返回时也记录原始文本（截断）
-                    logger.info(
-                        f"[sign_forum] 非JSON返回，视为成功。args=({kw!r},) kwargs={{}} raw={resp.text[:200]!r}"
-                    )
+                    # 非 JSON 返回时：是否打印 raw 由开关控制
+                    if LOG_SIGN_RAW:
+                        logger.info(
+                            f"[sign_forum] 非JSON返回，视为成功。args=({kw!r},) kwargs={{}} raw={resp.text[:200]!r}"
+                        )
+                    else:
+                        logger.info(
+                            f"[sign_forum] 非JSON返回，视为成功。args=({kw!r},) kwargs={{}}"
+                        )
                     return {'error_code': 0}
 
                 if check_wind_control(jr):
