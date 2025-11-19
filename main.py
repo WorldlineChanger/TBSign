@@ -933,8 +933,32 @@ async def moderator_task(client: "aiotieba.Client", bar_name, post_id, bduss, st
                             await rnd_sleep()
                             logger.info(f"直连兜底尝试 ({direct_try}/3)")
                             async with aiotieba.Client(BDUSS=bduss, STOKEN=stoken, proxy=False) as c3:
+                                # 显式检查登录状态
+                                try:
+                                    u_info = await c3.get_user_info()
+                                    logger.info(f"直连登录检查: user={u_info.user_name}, is_login={bool(u_info.user_name)}")
+                                except Exception as e:
+                                    logger.warning(f"直连登录检查异常: {e}")
+
+                                # 强制刷新 TBS
+                                try:
+                                    tbs_val = await c3.get_tbs()
+                                    logger.info(f"直连 TBS 刷新: {tbs_val}")
+                                except Exception as e:
+                                    logger.warning(f"直连 TBS 刷新异常: {e}")
+
                                 add_res = await c3.add_post(int(fid), int(post_id), content)
-                            
+                                
+                                # 针对 error_code 1 (未登录) 的额外重试
+                                if add_res.err and str(add_res.err.code) == '1':
+                                    logger.warning("直连遇到未登录错误(1)，尝试再次刷新 TBS 并重试...")
+                                    await asyncio.sleep(2)
+                                    try:
+                                        await c3.get_tbs() # 再次刷新
+                                    except:
+                                        pass
+                                    add_res = await c3.add_post(int(fid), int(post_id), content)
+
                             if not add_res.err:
                                 logger.info("直连兜底成功")
                                 break
