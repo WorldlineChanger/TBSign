@@ -928,10 +928,22 @@ async def moderator_task(client: "aiotieba.Client", bar_name, post_id, bduss, st
 
                     # 仍失败且是相同错误 -> 直连兜底
                     if add_res.err and (("Can not write request body" in str(add_res.err)) or ("Cannot write request body" in str(add_res.err))):
-                        await rnd_sleep()
-                        logger.info("重建连接后仍失败，启用直连兜底再试一次")
-                        async with aiotieba.Client(BDUSS=bduss, STOKEN=stoken, proxy=False) as c3:
-                            add_res = await c3.add_post(int(fid), int(post_id), content)
+                        logger.info("重建连接后仍失败，启用直连兜底（尝试3次）")
+                        for direct_try in range(1, 4):
+                            await rnd_sleep()
+                            logger.info(f"直连兜底尝试 ({direct_try}/3)")
+                            async with aiotieba.Client(BDUSS=bduss, STOKEN=stoken, proxy=False) as c3:
+                                add_res = await c3.add_post(int(fid), int(post_id), content)
+                            
+                            if not add_res.err:
+                                logger.info("直连兜底成功")
+                                break
+                            
+                            logger.warning(f"直连兜底第 {direct_try} 次失败: {add_res.err}")
+                            if direct_try < 3:
+                                wait_time = random.uniform(10, 20)
+                                logger.info(f"等待 {wait_time:.1f} 秒后重试...")
+                                await asyncio.sleep(wait_time)
 
             # 成功路径
             if not add_res.err:
