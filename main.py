@@ -874,6 +874,114 @@ def client_sign(bduss, tbs, fid, kw):
     return {'error_code': -1, 'msg': 'sign failed after per-path retries'}
 
 # -----------------------------
+# 3.1 客户端回帖 (HTTP 版)
+# -----------------------------
+def client_reply(bduss: str, fid: str, kw: str, tid: int, content: str, tbs: str = None):
+    """
+    使用 Tieba 手机 HTTP 接口回帖：
+      POST https://c.tieba.baidu.com/c/c/post/add
+    复用现有 SIGN_DATA / encodeData / ProxyManager，绕过 aiotieba.add_post。
+    每条线路最多重试3次，最终会退到直连重试。
+    """
+    logger.info(f"HTTP 回帖开始: kw={kw}, tid={tid}")
+
+    # 构造参数（与客户端风格保持一致）
+    data = {
+        **SIGN_DATA,
+        "BDUSS": bduss,
+        "fid": str(fid),
+        "kw": kw,
+        "tid": str(tid),
+        "content": content,
+        "timestamp": str(int(time.time())),
+    }
+    if tbs:
+        data["tbs"] = tbs
+
+    encoded_data = encodeData(dict(data))
+    headers = get_headers(is_mobile=True)
+    cookies = {BDUSS: bduss}
+
+    # 三段式线路：首选代理 -> 第一条免费代理 -> 直连
+    chain = []
+    if PROXY_ENABLE and SOCKS_PROXY:
+        chain.append(SOCKS_PROXY)
+
+    backup_proxy = None
+    try:
+        proxy_list_full = proxy_manager.get_proxy_list()  # [user_proxy?, backup..., None]
+        for p in proxy_list_full:
+            if p and p != SOCKS_PROXY:
+                backup_proxy = p
+                break
+    except Exception:
+        backup_proxy = None
+    if backup_proxy:
+        chain.append(backup_proxy)
+
+    chain.append(None)  # 直连
+    total_paths = len(chain)
+
+    for path_idx, p in enumerate(chain, start=1):
+        proxy_info_for_log = proxy_manager._sanitize_proxy_url(p)
+        logger.info(f"回复请求尝试 ({path_idx}/{total_paths}) 使用: {proxy_info_for_log}")
+        proxies = {'http': p, 'https': p} if p else None
+
+        # 每条线路内部重试 3 次
+        for inner_try in range(1, 4):
+            try:
+                resp = s.post(
+                    REPLY_URL.replace("http://", "https://"),
+                    headers=headers,
+                    cookies=cookies,
+                    data=encoded_data,
+                    proxies=proxies,
+                    timeout=10
+                )
+                resp.raise_for_status()
+                proxy_manager.test_and_log_success(p)
+
+                try:
+                    jr = resp.json()
+                except JSONDecodeError:
+                    logger.warning(
+                        f"[reply_forum] 非JSON返回，视为失败。raw={resp.text[:200]!r}"
+                    )
+                    break  # 当前线路的本次尝试失败，继续 inner 重试
+
+                code = str(jr.get("error_code", ""))
+                msg = jr.get("error_msg") or jr.get("msg") or ""
+                logger.info(f"[reply_forum] code={code} msg={msg}")
+
+                if check_wind_control(jr):
+                    return False, None
+
+                # 视 0 / 160002 / 1101 为成功（已回复之类也不算失败）
+                if code in ("0", "160002", "1101"):
+                    pid = jr.get("post_id") or jr.get("pid")
+                    logger.info(f"[reply_forum] 成功，pid={pid}")
+                    return True, pid
+
+                # 其他错误码直接认为回帖失败（逻辑错误，不再切换线路）
+                if code == "1":
+                    logger.warning("HTTP 回帖返回 code=1：用户未登录或登录失败，请检查 BDUSS/STOKEN")
+                elif code == "1102":
+                    logger.warning("HTTP 回帖返回 1102：操作过快或未开通回帖权限")
+                else:
+                    logger.warning(f"HTTP 回帖返回错误 code={code}, msg={msg}")
+                return False, None
+
+            except requests.exceptions.RequestException as e:
+                logger.warning(f"回帖请求失败(第{inner_try}/3): {e}")
+                if inner_try < 3:
+                    time.sleep(random.uniform(3.0, 5.0))
+                else:
+                    logger.warning("该线路3次均失败，切换下一线路")
+
+    logger.error("HTTP 回帖所有线路均失败")
+    return False, None
+
+# -----------------------------
 # 4. 吧主任务：回复+删除 & 置顶/取消置顶（AIO）
 # -----------------------------
 async def simulate_view_post(client: "aiotieba.Client", fid, tid):
@@ -887,7 +995,7 @@ async def simulate_view_post(client: "aiotieba.Client", fid, tid):
         logger.warning(f"模拟浏览失败: {e}")
         return False
 
-async def moderator_task(client: "aiotieba.Client", bar_name, post_id, bduss, stoken, proxy_cfg):
+async def moderator_task(client: "aiotieba.Client", bar_name, post_id, bduss, stoken, proxy_cfg, tbs):
     """执行吧主考核任务，采用防检测措施（AIO）"""
     success = {'reply': False, 'top': False}
     if not DO_MODERATOR_TASK:
@@ -907,85 +1015,35 @@ async def moderator_task(client: "aiotieba.Client", bar_name, post_id, bduss, st
     await simulate_view_post(client, fid, int(post_id))
     await rnd_sleep()
 
-    # 2. 回复 & 删除（失败重建 Client + 直连兜底）
+    # 2. 回复 & 删除（改为 HTTP 接口，不再使用 aiotieba.add_post）
     if DO_MODERATOR_POST:
         content = await build_reply_content_async()
         logger.info(f"回复内容: {content}")
         try:
-            # 第一次尝试（使用当前 client）
-            add_res = await client.add_post(int(fid), int(post_id), content)
-            if add_res.err:
-                err_s = str(add_res.err)
-                logger.error(f"回复失败: {add_res.err}")
+            kw = bar_name.rstrip("吧")
+            ok, pid = client_reply(bduss, fid, kw, int(post_id), content, tbs)
 
-                # 特征错误：写入请求体失败 -> 重建 client 再试
-                if ("Can not write request body" in err_s) or ("Cannot write request body" in err_s):
-                    await rnd_sleep()
-                    # 2.1 重建一次相同代理的新连接
-                    logger.info("检测到写入请求体失败，重建连接后重试一次（同代理）")
-                    async with aiotieba.Client(BDUSS=bduss, STOKEN=stoken, proxy=proxy_cfg) as c2:
-                        add_res = await c2.add_post(int(fid), int(post_id), content)
-
-                    # 仍失败且是相同错误 -> 直连兜底
-                    if add_res.err and (("Can not write request body" in str(add_res.err)) or ("Cannot write request body" in str(add_res.err))):
-                        logger.info("重建连接后仍失败，启用直连兜底（尝试3次）")
-                        for direct_try in range(1, 4):
-                            await rnd_sleep()
-                            logger.info(f"直连兜底尝试 ({direct_try}/3)")
-                            async with aiotieba.Client(BDUSS=bduss, STOKEN=stoken, proxy=False) as c3:
-                                # 显式检查登录状态
-                                try:
-                                    u_info = await c3.get_user_info()
-                                    logger.info(f"直连登录检查: user={u_info.user_name}, is_login={bool(u_info.user_name)}")
-                                except Exception as e:
-                                    logger.warning(f"直连登录检查异常: {e}")
-
-                                # 强制刷新 TBS
-                                try:
-                                    tbs_val = await c3.get_tbs()
-                                    logger.info(f"直连 TBS 刷新: {tbs_val}")
-                                except Exception as e:
-                                    logger.warning(f"直连 TBS 刷新异常: {e}")
-
-                                add_res = await c3.add_post(int(fid), int(post_id), content)
-                                
-                                # 针对 error_code 1 (未登录) 的额外重试
-                                if add_res.err and str(add_res.err.code) == '1':
-                                    logger.warning("直连遇到未登录错误(1)，尝试再次刷新 TBS 并重试...")
-                                    await asyncio.sleep(2)
-                                    try:
-                                        await c3.get_tbs() # 再次刷新
-                                    except:
-                                        pass
-                                    add_res = await c3.add_post(int(fid), int(post_id), content)
-
-                            if not add_res.err:
-                                logger.info("直连兜底成功")
-                                break
-                            
-                            logger.warning(f"直连兜底第 {direct_try} 次失败: {add_res.err}")
-                            if direct_try < 3:
-                                wait_time = random.uniform(10, 20)
-                                logger.info(f"等待 {wait_time:.1f} 秒后重试...")
-                                await asyncio.sleep(wait_time)
-
-            # 成功路径
-            if not add_res.err:
+            if ok:
                 success['reply'] = True
-                pid = getattr(add_res, "pid", None)
-                logger.info(f"回复成功 pid={pid}")
-                # 删除回复
+                logger.info(f"HTTP 回帖成功 pid={pid}")
+
                 if DO_MODERATOR_DELETE and pid:
                     await rnd_sleep()
-                    del_res = await client.del_post(int(fid), int(post_id), int(pid))
-                    if del_res.err:
-                        logger.info(f"删除回复失败: {del_res.err}")
-                    else:
-                        logger.info("删除回复成功")
+                    try:
+                        del_res = await client.del_post(int(fid), int(post_id), int(pid))
+                        if del_res.err:
+                            logger.info(f"删除回复失败: {del_res.err}")
+                        else:
+                            logger.info("删除回复成功")
+                    except Exception as e:
+                        logger.warning(f"删除回复异常: {e}")
                 else:
-                    logger.info("删除操作已关闭或 pid 缺失")
+                    if DO_MODERATOR_DELETE:
+                        logger.info("回帖成功，但接口未返回 pid 或 pid 无效，无法删除")
+                    else:
+                        logger.info("删除操作已关闭")
             else:
-                logger.error(f"回复最终失败: {add_res.err}")
+                logger.error("HTTP 回帖最终失败")
 
         except Exception as e:
             logger.error(f"回复/删除阶段失败: {e}")
@@ -1276,7 +1334,7 @@ async def async_main():
                         continue
                     seen.add(bar)
                     logger.info(f"执行吧主任务:{bar}")
-                    status = await moderator_task(client, bar, pid, bduss, stoken, proxy_cfg)
+                    status = await moderator_task(client, bar, pid, bduss, stoken, proxy_cfg, tbs)
                     task_status.append(status)
                     await asyncio.sleep(random.uniform(6, 12))
 
